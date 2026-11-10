@@ -109,5 +109,5 @@
 - otscup/secrets-broker が bitwarden.com の個人クラウドで実際に動くか
 - 別ユーザーで動く門番から Touch ID の確認を出せるか → Muse の答え：門番自身は出せない。ログイン中のユーザーで動くヘルパー（LaunchAgent）を置けば出せる。まだ試していない
 - 別ユーザーのプロセスの環境変数を、ほかのユーザーが `ps eww` で読めないか → 2026-11-10 に `nobody` の `sleep` で確かめた。root でなければ読めない（root からは読める）。本番の形（launchd・`_monban`・`bws`）ではまだ。結果：[pre-v1-experiments.md](pre-v1-experiments.md) の実験1
-- `bws` の1回の呼び出しにかかる時間（手順：同じファイルの実験2）
+- `bws` の1回の呼び出しにかかる時間 → 2026-11-10 に測った。温まった `get` は約0.5秒、状態ファイルがない初回は約1.1秒。v1 は毎回子プロセスで呼ぶ形のままでよい。結果：同じファイルの実験2
 - Agent Access の既定の中継サーバー（ap.lesspassword.dev）を誰が運営しているか
