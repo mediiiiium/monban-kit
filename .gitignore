@@ -5,3 +5,6 @@
 .env.*
 *.token
 .DS_Store
+
+# Go のビルド結果
+/monban
