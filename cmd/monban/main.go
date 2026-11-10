@@ -1,5 +1,5 @@
 // monban は、Bitwarden Secrets Manager の前に置く門番。
-// 1段目（骨組み）：入口だけあり、中身はまだ空。
+// 2段目まで：daemon と run はソケットで繋がる。ほかの入口はまだ空。
 package main
 
 import (
@@ -51,8 +51,6 @@ func main() {
 	}
 }
 
-func runDaemon(args []string) error  { return errNotYet }
-func runRun(args []string) error     { return errNotYet }
 func runApprove(args []string) error { return errNotYet }
 func runDeny(args []string) error    { return errNotYet }
 func runStop(args []string) error    { return errNotYet }
