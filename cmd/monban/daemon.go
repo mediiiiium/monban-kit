@@ -3,13 +3,15 @@ package main
 // daemon：ソケットを開き、繋いできた相手の uid と pid を取る。
 // uid が設定の持ち主と違えば断る（2段目）。
 // 3段目：要求された秘密を bws で取り出し、1行のログを足す。
-// 4段目：許可リストで「どの秘密を・どのコマンドに・どの名札に」を照らす。値はまだ run に渡さない。
+// 4段目：許可リストで「どの秘密を・どのコマンドに・どの名札に」を照らす。
+// 5段目：通した要求には、値を返事に載せて run に渡す（run が環境変数に入れて exec する）。
 
 import (
 	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -231,6 +234,14 @@ type request struct {
 
 const maxRequest = 16384
 
+// maxValue は、run に渡す値の大きさの上限（バイト）。run の側も、これを元に読む量を絞る。
+const maxValue = 65536
+
+// okReply は、通したときの返事。値は base64 にして1行に収める（改行や空白を含む値でも行が崩れない）。
+func okReply(id, value string) string {
+	return "OK " + id + " " + base64.StdEncoding.EncodeToString([]byte(value)) + "\n"
+}
+
 // newRequestID は、人がログと照らすためのリクエストの ID。
 func newRequestID() string {
 	b := make([]byte, 6)
@@ -300,17 +311,24 @@ func (s *server) handle(c *net.UnixConn) {
 		deny("bws が失敗")
 		return
 	}
-	// 4段目でも値は渡さない（渡すのは5段目）。取れたことだけを返す。
-	_ = value
-	e.Result = "取れた"
+	// 環境変数に入れられない値（NUL を含む）と、大きすぎる値は渡さない。
+	if strings.IndexByte(value, 0) >= 0 || len(value) > maxValue {
+		deny("値を環境変数に入れられない（NUL を含むか、大きすぎる）")
+		return
+	}
+	// ログに「渡した」と残せてから渡す。残せないなら、通さない。
+	// ここで分かるのは「ソケットに書いた」まで。run が実際に exec したかは、門番からは見えない。
+	e.Result = "渡した"
 	if err := s.audit.write(e); err != nil {
-		// ログに残せないなら、通さない。
 		log.Printf("ログに書けない、断った id=%s: %v", e.ID, err)
 		fmt.Fprintln(c, "NG "+e.ID)
 		return
 	}
-	log.Printf("取れた id=%s uid=%d pid=%d secret=%s command=%s 引数の数=%d", e.ID, p.uid, p.pid, req.Secret, e.Command, e.Argc)
-	fmt.Fprintln(c, "OK "+e.ID+" 取れた（値はまだ渡さない）")
+	if _, err := io.WriteString(c, okReply(e.ID, value)); err != nil {
+		log.Printf("渡せなかった id=%s: %v", e.ID, err)
+		return
+	}
+	log.Printf("渡した id=%s uid=%d pid=%d secret=%s command=%s 引数の数=%d", e.ID, p.uid, p.pid, req.Secret, e.Command, e.Argc)
 }
 
 // clip は、ログに書く申告の文字列を n 文字までにする。

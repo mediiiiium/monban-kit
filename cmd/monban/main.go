@@ -1,5 +1,5 @@
 // monban は、Bitwarden Secrets Manager の前に置く門番。
-// 4段目まで：daemon は許可リストで照らし、bws で秘密を取り出してログを足す。run はまだ値を受け取らない。ほかの入口はまだ空。
+// 5段目まで：daemon は許可リストで照らし、bws で秘密を取り出してログを足し、値を run に渡す。run は値を環境変数に入れてコマンドを exec する。ほかの入口はまだ空。
 package main
 
 import (
