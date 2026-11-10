@@ -10,7 +10,7 @@ monban（門番）= gatekeeper。鍵を誰に・いつ渡すかを門番が決�
 
 ## いまの段階
 - Bitwarden を1週間試す（iPhone の「パスワード」アプリから数件だけ移す）
-- Secrets Manager の秘密を1つ、Claude Code と Codex の両方から使えるか手で通す
+- Secrets Manager の秘密を1つ、Claude Code と Codex の両方から使えるか手で通す（手順：[docs/first-secret-trial.md](docs/first-secret-trial.md)）
 - 結果を見て、門番を書くか、`bws` だけで足りるかを決める
 
 ## 注意
