@@ -89,6 +89,9 @@ sudo -k   # sudo の記憶を消す。エージェントが同じ端末で使え
 
 **人が自分のターミナルで**行う（エージェントに頼まない）。キーチェーンの確認が1回出るので、許可する（「常に許可」は押さない）。
 
+- **実験専用のターミナルウィンドウを新しく開いて**行う。手順0で合言葉をシェルの環境変数に入れるので、そのシェルからエージェント（`claude` や `codex`）を起動すると、合言葉がそのまま子プロセスに渡る
+- 実験中は、そのウィンドウでほかのコマンドを打たない。終わったら `unset` だけでなく、**ウィンドウごと閉じる**
+
 ```sh
 # 0. 合言葉をこのシェルにだけ読み込む（画面には出さない）
 export BWS_ACCESS_TOKEN="$(security find-generic-password -a "$USER" -s monban-trial-bws -w)"
@@ -108,8 +111,9 @@ rm -rf ~/.config/bws/state
 # 4. 温まった状態：続けて5回
 for i in 1 2 3 4 5; do /usr/bin/time -p bws secret get "$SID" > /dev/null; done
 
-# 5. 片づける
+# 5. 片づける（このあとウィンドウごと閉じる）
 unset BWS_ACCESS_TOKEN
+exit
 ```
 
 - `/usr/bin/time -p` は `real`（かかった時間）を出す。見るのは `real`
