@@ -72,4 +72,4 @@ Muse の回答を、相談の「聞きたいこと」の順にまとめた。末
 - ログインしないユーザーのデーモンからは、ログインのキーチェーンを実質的に使えない
 - System キーチェーンの項目の許可は、署名し直すたびに壊れる
 - Pushover には、承認か拒否かを返す仕組みがない（ボタンや折り返しがない）
-- ~~`GetsockoptXucred` で、繋いできたプロセスの uid が macOS で取れる~~ → 確かめた。Muse が pkg.go.dev の darwin 向けの説明で、関数・定数 `LOCAL_PEERCRED`・型 `Xucred` があることを確かめた。この Mac で実際に uid が返ることは、同じユーザーの中だけ確かめた（[v1-plan.md](v1-plan.md)）。別ユーザーからはまだ
+- ~~`GetsockoptXucred` で、繋いできたプロセスの uid が macOS で取れる~~ → 確かめた。Muse が pkg.go.dev の darwin 向けの説明で、関数・定数 `LOCAL_PEERCRED`・型 `Xucred` があることを確かめた。この Mac で実際に uid が返ることも確かめた。同じユーザーの中と、`nobody` から（2026-11-10、[v1-plan.md](v1-plan.md) の2段目）
