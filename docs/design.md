@@ -83,13 +83,14 @@
 ## 門番の v1（2026-11-10 に Muse と相談して決めた）
 
 相談と回答：[muse-consult-gatekeeper.md](muse-consult-gatekeeper.md)、[muse-consult-gatekeeper-response.md](muse-consult-gatekeeper-response.md)
+作る順番：[v1-plan.md](v1-plan.md)
 
 - **形**：薄い門番を自分で書く（案 B）。mcp-warden からは許可リストの書き方・時間枠つき承認・ハッシュ連鎖のログを、R055LE/secrets-broker からは別デバイス承認の段取りを借りる。コードは借りない
 - **作り**：
   - Go の単一バイナリ。Mac の別ユーザー `_monban` で launchd のデーモンとして動かす。エージェントとは Unix ソケットだけで話す
-  - 合言葉は `_monban` のキーチェーンに置き、`bws` には環境変数で渡す（引数では渡さない）
+  - 合言葉は `_monban` だけが読める 0600 のファイルに置き、`bws` には環境変数で渡す（引数では渡さない）。ログインしないユーザーのキーチェーンは実質使えないので、キーチェーンには置かない（2026-11-10 に Muse と相談して変更。[muse-consult-v1-plan-response.md](muse-consult-v1-plan-response.md)）
   - `bws` は子プロセスで呼ぶ。起動時に `bws` の署名（TeamIdentifier `LTZ2PFU5D6`）を確かめる
-- **v1 に入れる**：読むだけ、許可リスト、ログ（`_monban` の持ち物にして、エージェントから書き換えられなくする）、キルスイッチ、コマンド単位の注入（`monban run`）、スマホへの承認依頼（Pushover）
+- **v1 に入れる**：読むだけ、許可リスト、ログ（`_monban` の持ち物にして、エージェントから書き換えられなくする）、キルスイッチ、コマンド単位の注入（`monban run`）、承認（Pushover で知らせ、判断はターミナルの `monban approve` / `deny`。Pushover は承認か拒否かを返せない）
 - **v1 に入れない**：MCP、代理実行（段 C）、Touch ID のヘルパー（v2。LaunchAgent でログイン中のユーザーとして動かし、合言葉は持たせない）、Windows、ログイン情報の JSON 規約、**高リスクの秘密**（強い承認が付くまで門番に預けない）
 - **v1.5 の候補**：注入先のコマンドの出力から秘密の値を探して伏せる
 - **正直に書くこと**：
