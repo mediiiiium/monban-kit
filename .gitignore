@@ -1,0 +1,7 @@
+# パスワードの書き出しファイル（平文）を絶対にコミットしない
+*.csv
+*.json.export
+.env
+.env.*
+*.token
+.DS_Store

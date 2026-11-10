@@ -1,0 +1,86 @@
+# AIエージェントも使える、自分用のパスワード管理の構成をOSSで出す
+
+作成日: 2026-11-10
+
+## ステータス
+- 2026-11-10 に ideas の seeds から移した。まだコードはない
+- 形：**構成集**（部品の組み合わせ＋導入手順＋足りない分だけの薄いコード）。dotfiles を公開する感覚。パスワードを預かるサービスではない
+- 2026-11-10 に Muse と壁打ちした。「新しいデーモンより構成集」で一致
+
+---
+
+## 一次経験（ここが出発点）
+
+- パスワード管理が面倒。AIエージェントにも使わせたいが、渡し方が毎回手作業で怖い
+- 複数のデバイス（Mac・Linux・Windows・スマホ）で使いたい
+- AIは Claude に限らない（Codex、Gemini CLI など）
+
+## 要件
+- 金庫はクラウドでよい → Bitwarden（複数デバイス、エージェント向けの部品が一番揃っている）
+- 原則：エージェントには必要な項目だけ、人の承認を経て渡す。「見せない」は効果を盛らずに書く
+
+---
+
+## 構成（見直し後）
+
+```
+人用の金庫      : Bitwarden 個人金庫（普段使い。エージェントは触らない）
+エージェント用  : Bitwarden Secrets Manager（無料：マシンアカウント3・プロジェクト3・秘密は無制限）
+                  ログイン情報は値にJSONを入れる規約で持つ（Notte の BitwardenVault の前例）
+門番            : 許可リスト・代理実行・時間枠つき承認・キルスイッチ（mcp-warden の設計を借りる）
+離れた場所      : Bitwarden Agent Access（ログインごとに人が承認。中継サーバーはセルフホスト推奨）
+```
+
+**途中で捨てた案と理由**
+
+| 案 | 捨てた理由 |
+|---|---|
+| `bw serve` を常駐させ、その前に門番を置く | `bw serve` には認証がない。同じユーザーのエージェントは門番を通らずに全件取れる。別ユーザー＋Unixソケット（`--hostname unix:///パス`、CLI 2025.10.0〜。コードで確認）にすれば防げるが、Mac・Windows の導入が重い |
+| `rbw` で高速化 | エージェントが `rbw get` を直接呼べるので門番を迂回される。Windows に触れていない。パスキーとDuoの2段階認証に対応していない |
+| 公式 Bitwarden MCP をそのまま使う | 呼び出しごとに `bw` を起動するので遅い（`bw status` で約3.4秒）。パスワードをAIに返す。項目を絞る設定がない |
+
+---
+
+## 構成集に書くこと
+
+- **2つのモード**：簡易＝同じユーザー＋門番＋承認（隔離ではなく事故防止だと明記）／厳格＝専用ユーザーかVM。Windows は WSL2 に寄せて Linux の手順に一本化する
+- **承認**：
+  - リスクで段を分ける。低リスクは時間枠つきの事前承認、高リスクは毎回の強い承認（Touch ID・Windows Hello・スマホ通知）
+  - 承認画面には、エージェントの説明文ではなく門番が作った事実（項目・操作・宛先・コマンドのハッシュ）を出す
+  - 承認はそのリクエストだけに使える1回限り・短命なものにする
+- **「見せない」の段**：
+  - A：承認後に値を返す
+  - B：環境変数で注入する（モデルの文脈に残らないだけで、秘匿ではない）
+  - C：代理実行（高価値の少数だけ）
+  - ワンタイムコードは、シードではなく現在のコードだけを返す
+- **失効手順**：パスワード変更・aac のペアリング解除・停止を1手順にまとめる
+- **サプライチェーン**：中継サーバーのセルフホスト手順、bw と aac のチェックサム確認
+- **門番の2系統**：個人金庫が背後＝otscup/secrets-broker／Secrets Manager が背後＝R055LE/secrets-broker（Linuxのみ）。otscup はライセンス表記が AGPL と MIT で食い違うので、同梱・改変するなら作者に確認する
+
+---
+
+## 競合（2026-11-10 調査）
+
+**部品は揃っている。空いているのは「Bitwarden を背後にした個人の構成＋導入手順」。**
+
+- [otscup/secrets-broker](https://github.com/otscup/secrets-broker)：Bitwarden互換の金庫（bw CLI）を背後に置き、エージェントごとの合言葉、承認（Telegram・ntfy・Web、時間枠つき）、MCP、代理実行まで揃っている。一番近い。スター0、リリースなし
+- [ermoluk/mcp-warden](https://github.com/ermoluk/mcp-warden)：一番成熟している（Apache-2.0、v0.6.0）。許可リスト、門番側での注入、時間枠つき承認、キルスイッチ、Telegram承認。金庫はOSのキーチェーンで、**Bitwardenには対応していない**
+- [R055LE/secrets-broker](https://github.com/R055LE/secrets-broker)：Secrets Manager を背後に置く。別のLinuxユーザー＋別デバイスで承認する。Linuxのみ
+- [asteby/veil](https://github.com/asteby/veil)：値をエージェントに見せずに人が入力するMCP。Bitwardenには対応していない。初期段階
+- [OneCLI](https://onecli.sh/blog/bitwarden-agent-access-sdk-onecli)：Agent Access と連携し、通信の段階で認証情報を注入するゲートウェイ。アルファ版
+- [Notte](https://docs.notte.cc/integrations/bitwarden)：AacVault（Agent Access 経由で個人金庫を読むだけ。ログインごとに `aac listen` 側で承認）と BitwardenVault（Secrets Manager。ログイン1件を秘密1つにし、値はJSON。`url` と `password` が必須、`username`・`email`・`mfa_secret`（TOTPシードか otpauth URI）は任意）。どちらも手元のセッション専用（[PR #816](https://github.com/nottelabs/notte/pull/816)）
+- Bitwarden 公式：[MCPサーバー](https://github.com/bitwarden/mcp-server)、[Agent Access](https://github.com/bitwarden/agent-access)（Apache-2.0、初期プレビュー、v0.11.0）
+- 1Password の日本語記事、Passwd、Cerberus KeyRouter、warden-mcp も同じ領域
+
+---
+
+## 次の一手（未決）
+
+- Bitwarden の無料版と Secrets Manager の無料版を1週間実際に使ってみる
+- mcp-warden に Bitwarden（Secrets Manager）対応を足す提案ができるか、作者の方針を見る
+- 1本だけ手で通す：Secrets Manager の秘密を1つ、承認つきで Claude Code と Codex の両方から使えるか
+
+## 未確認
+- otscup/secrets-broker が bitwarden.com の個人クラウドで実際に動くか
+- 別ユーザーで動く門番から Touch ID の確認を出せるか
+- Agent Access の既定の中継サーバー（ap.lesspassword.dev）を誰が運営しているか
