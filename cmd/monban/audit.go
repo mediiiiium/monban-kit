@@ -16,12 +16,17 @@ import (
 )
 
 type auditEntry struct {
-	Time   string `json:"time"`
-	UID    uint32 `json:"uid"`
-	PID    int    `json:"pid"`
-	Agent  string `json:"agent"`  // 申告されたもの。認証ではない
-	Secret string `json:"secret"` // 名前だけ。値は書かない
-	Result string `json:"result"`
+	Time       string `json:"time"`
+	ID         string `json:"id,omitempty"` // リクエストの ID。断ったときに相手に返すのはこれだけ
+	UID        uint32 `json:"uid"`
+	PID        int    `json:"pid"`
+	Agent      string `json:"agent"`             // 申告されたもの。認証ではない
+	Secret     string `json:"secret"`            // 名前だけ。値は書かない
+	Command    string `json:"command,omitempty"` // 申告されたコマンドの絶対パス
+	Argc       int    `json:"argc"`              // 引数の数。全文は書かない（別の秘密が入りうる）
+	ArgsSHA256 string `json:"args_sha256,omitempty"`
+	UserOwned  bool   `json:"user_owned,omitempty"` // ユーザーの持ち物の場所のコマンドを許した項目で通した
+	Result     string `json:"result"`
 }
 
 type auditLog struct {

@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +26,7 @@ const bwsRequirement = `anchor apple generic and identifier "bws" and certificat
 type bwsClient struct {
 	path  string // 確かめた本当の場所
 	token string
-	home  string // bws の状態ファイルの置き場（HOME として渡す）
+	home  string // bws の状態ファイルの置き場（HOME として渡す）。合言葉のディレクトリの下の bws-home
 }
 
 // checkBws は、bws の置き場をたどり、署名を確かめて、本当の場所を返す。
@@ -45,11 +47,13 @@ func checkBws(path string) (string, error) {
 
 // readToken は、0700 のディレクトリの中の 0600 のファイルから合言葉を1回だけ読む。
 // どちらも自分の持ち物でなければ読まない。
-func readToken(path string) (token, dir string, err error) {
+// bws の状態ファイルは、同じディレクトリの下の bws-home（0700）に置く。合言葉の置き場には、
+// 合言葉のファイルと bws-home のほかは何もない形にして、余計なものが増えたら気づけるようにする。
+func readToken(path string) (token, home string, err error) {
 	if !filepath.IsAbs(path) {
 		return "", "", fmt.Errorf("合言葉のファイルは絶対パスにしてください: %s", path)
 	}
-	dir = filepath.Dir(path)
+	dir := filepath.Dir(path)
 	if err := checkPrivate(dir, 0o700, true); err != nil {
 		return "", "", fmt.Errorf("合言葉のディレクトリ: %w", err)
 	}
@@ -64,7 +68,31 @@ func readToken(path string) (token, dir string, err error) {
 	if token == "" || strings.ContainsAny(token, " \t\r\n") {
 		return "", "", errors.New("合言葉のファイルの中身が1行の合言葉ではない")
 	}
-	return token, dir, nil
+	home = filepath.Join(dir, "bws-home")
+	if err := os.Mkdir(home, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return "", "", err
+	}
+	if err := checkPrivate(home, 0o700, true); err != nil {
+		return "", "", fmt.Errorf("bws の状態ファイルの置き場: %w", err)
+	}
+	if ents, err := os.ReadDir(dir); err == nil {
+		for _, e := range ents {
+			if n := e.Name(); n != filepath.Base(path) && n != "bws-home" {
+				log.Printf("注意：合言葉のディレクトリに、合言葉と bws-home のほかのものがある: %s", n)
+			}
+		}
+	}
+	return token, home, nil
+}
+
+// redact は、知っている秘密（合言葉や値）の文字列が s にあれば伏せる。空の文字列は無視する。
+func redact(s string, secrets ...string) string {
+	for _, x := range secrets {
+		if x != "" {
+			s = strings.ReplaceAll(s, x, "[伏せた]")
+		}
+	}
+	return s
 }
 
 var errBws = errors.New("bws が失敗した")
@@ -80,11 +108,12 @@ func (b *bwsClient) get(ctx context.Context, name, id string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		// stderr はエラーの説明だけのはずだが、念のため最初の段落（「Error:」と理由）・200 バイトまでにする。
-		para, _, _ := strings.Cut(strings.TrimSpace(stderr.String()), "\n\n")
+		// stderr はエラーの説明だけのはずだが、念のため合言葉を伏せ、最初の段落（「Error:」と理由）・200 バイトまでにする。
+		// 本番（常駐化の段）では生の stderr を出さず、失敗の分類と終了コードだけにする。
+		para, _, _ := strings.Cut(strings.TrimSpace(redact(stderr.String(), b.token)), "\n\n")
 		msg := strings.Join(strings.Fields(para), " ")
 		if len(msg) > 200 {
-			msg = msg[:200]
+			msg = strings.ToValidUTF8(msg[:200], "")
 		}
 		return "", fmt.Errorf("%w（%v）: %s", errBws, err, msg)
 	}

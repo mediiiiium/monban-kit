@@ -1,7 +1,8 @@
 package main
 
 // run：門番に繋いで「どの秘密が欲しいか」を送り、返事を表示する。
-// 3段目では、門番が bws で取れたかどうかが返るだけ。値を受け取って exec するのは5段目（注入）。
+// 4段目では、門番が許可リストで照らし、bws で取れたかどうかが返るだけ。値を受け取って exec するのは5段目（注入）。
+// 5段目で守ること：値は引数にもファイルにも置かず、受け取ったらソケットを閉じてからすぐ exec する。
 
 import (
 	"bufio"
@@ -10,6 +11,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -31,11 +34,27 @@ func agentName() string {
 	return "名乗らず"
 }
 
-func runRun(args []string) error {
-	if len(args) < 1 || args[0] == "--" {
-		return errors.New("使い方: monban run <秘密> -- <コマンド>")
+// resolveCommand は、コマンドを PATH から引いて絶対パスにする。門番は PATH を信じないので、run の側で決める。
+// 5段目では、ここで決めたパスをそのまま exec する（送ったものと違うものを動かさない）。
+func resolveCommand(name string) (string, error) {
+	p, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
 	}
-	secret := args[0]
+	return filepath.Abs(p)
+}
+
+func runRun(args []string) error {
+	const use = "使い方: monban run <秘密> -- <コマンド> [引数…]"
+	if len(args) < 3 || args[1] != "--" {
+		return errors.New(use)
+	}
+	secret, command := args[0], args[2:]
+	path, err := resolveCommand(command[0])
+	if err != nil {
+		return fmt.Errorf("コマンドが見つからない: %w", err)
+	}
+	command = append([]string{path}, command[1:]...)
 
 	c, err := net.DialTimeout("unix", socketPath(), 5*time.Second)
 	if err != nil {
@@ -44,7 +63,7 @@ func runRun(args []string) error {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 
-	req, _ := json.Marshal(request{Agent: agentName(), Secret: secret})
+	req, _ := json.Marshal(request{Agent: agentName(), Secret: secret, Command: command})
 	if _, err := c.Write(append(req, '\n')); err != nil {
 		return fmt.Errorf("門番に送れない: %w", err)
 	}
@@ -53,9 +72,13 @@ func runRun(args []string) error {
 		return fmt.Errorf("門番の返事を読めない: %w", err)
 	}
 	line = strings.TrimSpace(line)
-	if line != "OK" && !strings.HasPrefix(line, "OK ") {
-		return errors.New("門番に断られた: " + strings.TrimPrefix(line, "NG "))
+	if id, ok := strings.CutPrefix(line, "NG "); ok || line == "NG" {
+		return fmt.Errorf("門番に断られた（リクエストの ID %s）。理由は門番のログを見てください", id)
 	}
-	fmt.Println("門番に通された: " + strings.TrimPrefix(line, "OK "))
+	rest, ok := strings.CutPrefix(line, "OK ")
+	if !ok {
+		return errors.New("門番の返事を読めない")
+	}
+	fmt.Println("門番に通された: " + rest)
 	return nil
 }
