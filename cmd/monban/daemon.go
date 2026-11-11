@@ -6,6 +6,8 @@ package main
 // 4段目：許可リストで「どの秘密を・どのコマンドに・どの名札に」を照らす。
 // 5段目：通した要求には、値を返事に載せて run に渡す（run が環境変数に入れて exec する）。
 // 6段目：承認が要る項目は、待ちにして Pushover で知らせ、monban approve の後で初めて bws から取る。
+// 8段目：キルスイッチ。monban stop の接続（持ち主の uid から）で、新しい要求を受けるのをやめ、
+// 待っている要求を断り、取り出し中の bws を止め、まだ渡していない値は渡さずに止まる。
 
 import (
 	"bufio"
@@ -52,6 +54,35 @@ type server struct {
 	push  *pushover      // nil なら知らせず、番号は画面のログにだけ出す（試すとき用）
 	stop  chan struct{}  // 止めるときに閉じる（待っている要求を断る）
 	conns sync.WaitGroup // 動いている接続。止めるときは、全部終わってから停止の行を書く
+
+	ctx      context.Context // 止めるときに取り消す（取り出し中の bws を止める）
+	cancel   context.CancelFunc
+	ln       *net.UnixListener
+	haltOnce sync.Once
+	why      string // 何で止めたか（停止の行と知らせに書く）
+}
+
+// halt は、門番を止め始める。何度呼んでもよい（最初の理由だけを残す）。
+// 新しい接続を受けるのをやめ、待っている要求を断り、取り出し中の bws を止める。
+func (s *server) halt(why string) {
+	s.haltOnce.Do(func() {
+		s.why = why
+		close(s.stop)
+		s.cancel()
+		if s.ln != nil {
+			s.ln.Close()
+		}
+	})
+}
+
+// stopped は、止め始めたか。
+func (s *server) stopped() bool {
+	select {
+	case <-s.stop:
+		return true
+	default:
+		return false
+	}
 }
 
 func runDaemon(args []string) error {
@@ -129,6 +160,7 @@ func runDaemon(args []string) error {
 		push:  push,
 		stop:  make(chan struct{}),
 	}
+	srv.ctx, srv.cancel = context.WithCancel(context.Background())
 	// ユーザーの持ち物の場所のコマンドを許しているなら、本人が選んだ緩さとして画面とログに残す。
 	for _, w := range allow.weakRules() {
 		log.Printf("注意：ユーザーの持ち物の場所のコマンドを許している secret=%s command=%s", w[0], w[1])
@@ -148,13 +180,11 @@ func runDaemon(args []string) error {
 	seq, h := audit.head()
 	log.Printf("ログ seq %d ハッシュ %s", seq, h)
 	srv.notify("monban 起動", fmt.Sprintf("門番を起動した\nログ seq %d\nハッシュ %s", seq, h[:16]))
-	// 止めるときにソケットを消す。
+	srv.ln = ln
 	go func() {
-		<-sig
-		close(srv.stop)
-		ln.Close()
+		s := <-sig
+		srv.halt("合図 " + s.String())
 	}()
-	defer os.Remove(*sockPath)
 
 	log.Printf("待ち受け開始 socket=%s owner-uid=%d bws=%s 秘密の数=%d Pushover=%v", *sockPath, *ownerUID, bwsReal, len(allow.secrets), push != nil)
 	for {
@@ -163,6 +193,10 @@ func runDaemon(args []string) error {
 			if errors.Is(err, net.ErrClosed) {
 				break
 			}
+			srv.halt("待ち受けが失敗した")
+			srv.conns.Wait()
+			audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "待ち受けが失敗して止めた"})
+			os.Remove(*sockPath)
 			return err
 		}
 		srv.conns.Add(1)
@@ -171,14 +205,16 @@ func runDaemon(args []string) error {
 			srv.handle(c)
 		}()
 	}
-	// 待っている要求は stop で断られる。動いている接続も締め切り（30秒）までに終わる。
+	// 待っている要求は stop で断られ、取り出し中の bws は取り消される。動いている接続も締め切り（30秒）までに終わる。
 	srv.conns.Wait()
-	seq, h, err = audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "門番を止めた"})
+	seq, h, err = audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "門番を止めた（" + srv.why + "）"})
 	if err != nil {
 		log.Printf("停止の行を書けない: %v", err)
 	}
-	log.Printf("止めた ログ seq %d ハッシュ %s", seq, h)
-	srv.notify("monban 停止", fmt.Sprintf("門番を止めた\nログ seq %d\nハッシュ %s", seq, h[:16]))
+	// ソケットは停止の行を書いてから消す。monban stop は、ソケットが消えたのを見て「止まった」と言う。
+	os.Remove(*sockPath)
+	log.Printf("止めた（%s） ログ seq %d ハッシュ %s", srv.why, seq, h)
+	srv.notify("monban 停止", fmt.Sprintf("門番を止めた（%s）\nログ seq %d\nハッシュ %s", srv.why, seq, h[:16]))
 	return nil
 }
 
@@ -359,6 +395,16 @@ func (s *server) handle(c *net.UnixConn) {
 		deny("要求を読めない")
 		return
 	}
+	if req.Op == opKill {
+		e.Op = opKill
+		s.handleKill(c, e, p)
+		return
+	}
+	// 止め始めた後に届いた要求（待ち受けを閉じる直前に繋いだもの）は、中身を見ずに断る。
+	if s.stopped() {
+		deny(outStopped)
+		return
+	}
 	if req.Op != "" {
 		e.Op = clip(req.Op, 16)
 		s.handleDecision(c, e, p, req, deny)
@@ -387,7 +433,16 @@ func (s *server) handle(c *net.UnixConn) {
 		c.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	value, err := s.bws.get(context.Background(), req.Secret, id)
+	if s.stopped() {
+		deny(outStopped)
+		return
+	}
+	value, err := s.bws.get(s.ctx, req.Secret, id)
+	if s.stopped() {
+		// 取り出している間に止めた。取れていても渡さない。
+		deny(outStopped)
+		return
+	}
 	if err != nil {
 		log.Printf("bws id=%s: %v", e.ID, err)
 		deny("bws が失敗")
@@ -399,6 +454,7 @@ func (s *server) handle(c *net.UnixConn) {
 		return
 	}
 	// ログに「渡した」と残せてから渡す。残せないなら、通さない。
+	// 止める要求は、この行より前に来れば渡さない（上で見ている）。後に来たら、もう渡している。
 	// ここで分かるのは「ソケットに書いた」まで。run が実際に exec したかは、門番からは見えない。
 	e.Result = "渡した"
 	if err := s.audit.write(e); err != nil {
@@ -411,6 +467,22 @@ func (s *server) handle(c *net.UnixConn) {
 		return
 	}
 	log.Printf("渡した id=%s uid=%d pid=%d secret=%s command=%s 引数の数=%d", e.ID, p.uid, p.pid, req.Secret, e.Command, e.Argc)
+}
+
+// opKill は、monban stop の接続の op。門番が書く停止の行（op stop）とは分ける。
+const opKill = "kill"
+
+// handleKill は、monban stop の接続。番号は要らない（止める向きは、間違って押しても秘密は出ない）。
+// 持ち主の uid の照合は handle で済んでいる。止める要求の行を書いてから「OK <ID>」を返し、止め始める。
+// ログに書けなくても止める（止める向きは安全な側）。
+func (s *server) handleKill(c net.Conn, e auditEntry, p peer) {
+	e.Result = "止める要求を受けた"
+	if err := s.audit.write(e); err != nil {
+		log.Printf("ログに書けない（それでも止める）: %v", err)
+	}
+	log.Printf("止める要求 id=%s uid=%d pid=%d", e.ID, p.uid, p.pid)
+	fmt.Fprintf(c, "OK %s\n", e.ID)
+	s.halt(fmt.Sprintf("monban stop、uid %d pid %d", p.uid, p.pid))
 }
 
 // clip は、ログに書く申告の文字列を n 文字までにする。

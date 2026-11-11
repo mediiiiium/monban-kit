@@ -106,6 +106,9 @@ func (b *bwsClient) get(ctx context.Context, name, id string) (string, error) {
 	cmd := exec.CommandContext(ctx, b.path, "secret", "get", id, "--output", "json", "--color", "no")
 	cmd.Env = []string{"BWS_ACCESS_TOKEN=" + b.token, "HOME=" + b.home}
 	cmd.Dir = b.home
+	// 取り消し（時間切れか、門番を止めた）のときは bws を kill する。bws が子を残して出力を握っていても、
+	// 2秒で待つのをやめる（止める要求の後に、門番が待たされ続けないように）。
+	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

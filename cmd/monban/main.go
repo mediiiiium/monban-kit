@@ -1,16 +1,13 @@
 // monban は、Bitwarden Secrets Manager の前に置く門番。
-// 7段目まで：daemon は許可リストで照らし、承認が要る項目は Pushover で知らせて monban approve を待ち、
+// 8段目まで：daemon は許可リストで照らし、承認が要る項目は Pushover で知らせて monban approve を待ち、
 // bws で秘密を取り出してログを足し、値を run に渡す。run は値を環境変数に入れてコマンドを exec する。
-// ログはハッシュの連鎖にし、verify-log で確かめる。stop はまだ空。
+// ログはハッシュの連鎖にし、verify-log で確かめる。stop は門番を止め、合言葉の失効の手順を出す。
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 )
-
-var errNotYet = errors.New("まだ作っていない")
 
 const usage = `使い方: monban <サブコマンド> [引数]
 
@@ -20,7 +17,7 @@ const usage = `使い方: monban <サブコマンド> [引数]
                             秘密を環境変数に入れてコマンドを実行する
   approve <番号>            承認を待っている要求を見て、承認する（番号は Pushover か門番のログにある8桁）
   deny <番号>               承認を待っている要求を拒否する
-  stop                      門番を止める（キルスイッチ）
+  stop                      門番を止め、合言葉の失効の手順を出す（キルスイッチ）
   verify-log [-at <seq>] <ログ>
                             ログのハッシュの連鎖を確かめる（-at はその seq の行のハッシュも出す）
 `
@@ -57,5 +54,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-
-func runStop(args []string) error { return errNotYet }
