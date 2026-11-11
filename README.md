@@ -26,10 +26,17 @@ monban（門番）= gatekeeper。自分用のパスワード管理の構成。�
 
 設計と経緯は [docs/design.md](docs/design.md)。
 
-## いまの段階
-- Bitwarden を1週間試す（iPhone の「パスワード」アプリから数件だけ移す）
-- Secrets Manager の秘密を1つ、Claude Code と Codex の両方から使えるか手で通す（手順：[docs/first-secret-trial.md](docs/first-secret-trial.md)）
-- 結果を見て、門番を書くか、`bws` だけで足りるかを決める
+## いまの段階（2026-11-11）
+
+**まだ使える形ではない。** 門番 v1 を作っている途中で、試すときは自分の uid で動かしている。本番の形（別ユーザー `_monban` で常駐）はまだない。
+
+- `bws` だけで足りるかを試した：足りない。同じユーザーで動く限り、合言葉はどの置き方でもエージェントから取れた（[docs/first-secret-trial.md](docs/first-secret-trial.md)）。だから門番を書くことにした
+- 門番 v1 は10段のうち7段まで作った（[docs/v1-plan.md](docs/v1-plan.md)）。どの段も、人のターミナルで確かめてから次へ進んでいる
+  - 済み：ソケット（相手の uid の照合）・`bws` で取り出す・許可リスト・コマンドへの注入（`monban run`）・承認（Pushover で知らせ、`monban approve`）・ログのハッシュ連鎖（`monban verify-log`）
+  - 残り：8 キルスイッチ（`monban stop`）、9 常駐化（`_monban` と launchd）、10 本番の形でもう一度確かめる
+- 試しに使っているのは、ダミーの秘密 `MONBAN_TEST` と、試用の合言葉だけ
+- v1 は高リスクの秘密を扱わない。ターミナルの承認は事故防止で、強い承認ではない（[docs/v1-plan.md](docs/v1-plan.md) の「これで防げないこと」）
+- 人の側（Bitwarden の個人金庫を普段使いで試す）は、まだ記録していない
 
 ## 注意
 パスワードの書き出しファイル（CSV など）や合言葉（トークン）は、このリポジトリに置かない。`.gitignore` で弾いているが、置かないのが前提。
