@@ -1,5 +1,6 @@
 // monban は、Bitwarden Secrets Manager の前に置く門番。
-// 5段目まで：daemon は許可リストで照らし、bws で秘密を取り出してログを足し、値を run に渡す。run は値を環境変数に入れてコマンドを exec する。ほかの入口はまだ空。
+// 6段目まで：daemon は許可リストで照らし、承認が要る項目は Pushover で知らせて monban approve を待ち、
+// bws で秘密を取り出してログを足し、値を run に渡す。run は値を環境変数に入れてコマンドを exec する。stop はまだ空。
 package main
 
 import (
@@ -16,8 +17,8 @@ const usage = `使い方: monban <サブコマンド> [引数]
   daemon                    門番を動かす（_monban で常駐する側）
   run <秘密> -- <コマンド> [引数…]
                             秘密を環境変数に入れてコマンドを実行する
-  approve <ID>              リクエストを承認する
-  deny <ID>                 リクエストを拒否する
+  approve <番号>            承認を待っている要求を見て、承認する（番号は Pushover か門番のログにある8桁）
+  deny <番号>               承認を待っている要求を拒否する
   stop                      門番を止める（キルスイッチ）
 `
 
@@ -52,6 +53,4 @@ func main() {
 	}
 }
 
-func runApprove(args []string) error { return errNotYet }
-func runDeny(args []string) error    { return errNotYet }
-func runStop(args []string) error    { return errNotYet }
+func runStop(args []string) error { return errNotYet }

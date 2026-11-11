@@ -77,9 +77,10 @@ func runRun(args []string) error {
 	return fmt.Errorf("コマンドを実行できない（%s）: %v", path, err)
 }
 
-// ask は、要求を1行送り、返事の1行を読んで値を返す。エラーには値を入れない。
+// ask は、要求を1行送り、返事を読んで値を返す。エラーには値を入れない。
+// 承認を待つ間（6段目）は返事が遅れるので、締め切りは待ちの上限より長くする。
 func ask(c net.Conn, req request) (string, error) {
-	c.SetDeadline(time.Now().Add(30 * time.Second))
+	c.SetDeadline(time.Now().Add(approvalTimeout + time.Minute))
 	b, _ := json.Marshal(req)
 	if _, err := c.Write(append(b, '\n')); err != nil {
 		return "", fmt.Errorf("門番に送れない: %w", err)
@@ -88,14 +89,23 @@ func ask(c net.Conn, req request) (string, error) {
 }
 
 // readReply は、門番の返事（「OK <ID> <base64 の値>」か「NG <ID>」）を読む。
+// その前に「WAIT <ID>」が1行来たら、承認を待っていると画面に出して、続きを待つ。
 // 読む量は、値の上限から決めて絞る（偽の門番に大量に送られても膨らまない）。
 func readReply(r io.Reader) (string, error) {
-	limit := int64(base64.StdEncoding.EncodedLen(maxValue) + 128)
-	line, err := bufio.NewReader(io.LimitReader(r, limit)).ReadString('\n')
+	limit := int64(base64.StdEncoding.EncodedLen(maxValue) + 256)
+	br := bufio.NewReader(io.LimitReader(r, limit))
+	line, err := br.ReadString('\n')
 	if err != nil {
 		return "", errors.New("門番の返事を読めない")
 	}
 	line = strings.TrimSuffix(line, "\n")
+	if id, ok := strings.CutPrefix(line, "WAIT "); ok {
+		fmt.Fprintf(os.Stderr, "monban run: 門番が人の承認を待っています（リクエストの ID %s、%d分で時間切れ）\n", clip(id, 32), int(approvalTimeout/time.Minute))
+		if line, err = br.ReadString('\n'); err != nil {
+			return "", errors.New("門番の返事を読めない")
+		}
+		line = strings.TrimSuffix(line, "\n")
+	}
 	if id, ok := strings.CutPrefix(line, "NG "); ok || line == "NG" {
 		return "", fmt.Errorf("門番に断られた（リクエストの ID %s）。理由は門番のログを見てください", id)
 	}

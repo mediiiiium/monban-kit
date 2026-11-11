@@ -44,3 +44,15 @@ func TestInjectEnv(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestReadReplyWait(t *testing.T) {
+	v, err := readReply(strings.NewReader("WAIT abc\nOK abc " + base64.StdEncoding.EncodeToString([]byte("x")) + "\n"))
+	if err != nil || v != "x" {
+		t.Fatalf("WAIT の後の値を読めない: %q %v", v, err)
+	}
+	for _, bad := range []string{"WAIT abc\n", "WAIT abc\nNG abc\n", "WAIT a\nWAIT b\nOK b eA==\n"} {
+		if _, err := readReply(strings.NewReader(bad)); err == nil {
+			t.Errorf("通ってしまった: %q", bad)
+		}
+	}
+}

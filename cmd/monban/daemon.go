@@ -5,6 +5,7 @@ package main
 // 3段目：要求された秘密を bws で取り出し、1行のログを足す。
 // 4段目：許可リストで「どの秘密を・どのコマンドに・どの名札に」を照らす。
 // 5段目：通した要求には、値を返事に載せて run に渡す（run が環境変数に入れて exec する）。
+// 6段目：承認が要る項目は、待ちにして Pushover で知らせ、monban approve の後で初めて bws から取る。
 
 import (
 	"bufio"
@@ -46,6 +47,9 @@ type server struct {
 	bws   *bwsClient
 	allow *allowlist
 	audit *auditLog
+	wait  waitList
+	push  *pushover     // nil なら知らせず、番号は画面のログにだけ出す（試すとき用）
+	stop  chan struct{} // 止めるときに閉じる（待っている要求を断る）
 }
 
 func runDaemon(args []string) error {
@@ -56,6 +60,7 @@ func runDaemon(args []string) error {
 	tokenFile := fl.String("token-file", "", "合言葉のファイル（必須。0700 のディレクトリの中の 0600）")
 	allowFile := fl.String("allowlist", "", "許可リスト（必須。JSON。本番は root の持ち物の 0644）")
 	logFile := fl.String("log", "", "ログのファイル（必須）")
+	pushFile := fl.String("pushover", "", "Pushover のトークンとユーザーキーの JSON（0700 のディレクトリの中の 0600）。なければ知らせず、承認の番号は画面のログにだけ出す")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
@@ -78,9 +83,19 @@ func runDaemon(args []string) error {
 	if err != nil {
 		return err
 	}
-	token, home, err := readToken(*tokenFile)
+	var others []string
+	if *pushFile != "" && filepath.Dir(*pushFile) == filepath.Dir(*tokenFile) {
+		others = append(others, filepath.Base(*pushFile))
+	}
+	token, home, err := readToken(*tokenFile, others...)
 	if err != nil {
 		return err
+	}
+	var push *pushover
+	if *pushFile != "" {
+		if push, err = readPushover(*pushFile); err != nil {
+			return err
+		}
 	}
 	audit, err := openAudit(*logFile)
 	if err != nil {
@@ -91,6 +106,8 @@ func runDaemon(args []string) error {
 		bws:   &bwsClient{path: bwsReal, token: token, home: home},
 		allow: allow,
 		audit: audit,
+		push:  push,
+		stop:  make(chan struct{}),
 	}
 	// ユーザーの持ち物の場所のコマンドを許しているなら、本人が選んだ緩さとして画面とログに残す。
 	for _, w := range allow.weakRules() {
@@ -110,11 +127,12 @@ func runDaemon(args []string) error {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sig
+		close(srv.stop)
 		ln.Close()
 	}()
 	defer os.Remove(*sockPath)
 
-	log.Printf("待ち受け開始 socket=%s owner-uid=%d bws=%s 秘密の数=%d", *sockPath, *ownerUID, bwsReal, len(allow.secrets))
+	log.Printf("待ち受け開始 socket=%s owner-uid=%d bws=%s 秘密の数=%d Pushover=%v", *sockPath, *ownerUID, bwsReal, len(allow.secrets), push != nil)
 	for {
 		c, err := ln.AcceptUnix()
 		if err != nil {
@@ -227,9 +245,11 @@ func peerOf(c *net.UnixConn) (peer, error) {
 
 // request は run から届く1行の JSON。名札もコマンドも申告（認証ではない）。
 type request struct {
-	Agent   string   `json:"agent"`   // 申告されたエージェント名（名札）
-	Secret  string   `json:"secret"`  // 秘密の名前
-	Command []string `json:"command"` // [絶対パス, 引数…]。run が PATH から引いて絶対パスにする
+	Agent   string   `json:"agent"`          // 申告されたエージェント名（名札）
+	Secret  string   `json:"secret"`         // 秘密の名前
+	Command []string `json:"command"`        // [絶対パス, 引数…]。run が PATH から引いて絶対パスにする
+	Op      string   `json:"op,omitempty"`   // 空なら秘密の要求。"show"・"approve"・"deny" は承認の側（6段目）
+	Code    string   `json:"code,omitempty"` // 承認の番号
 }
 
 const maxRequest = 16384
@@ -291,6 +311,11 @@ func (s *server) handle(c *net.UnixConn) {
 		deny("要求を読めない")
 		return
 	}
+	if req.Op != "" {
+		e.Op = clip(req.Op, 16)
+		s.handleDecision(c, e, p, req, deny)
+		return
+	}
 	e.Agent = clip(req.Agent, 64)
 	e.Secret = clip(req.Secret, 64)
 	if len(req.Command) > 0 {
@@ -304,6 +329,15 @@ func (s *server) handle(c *net.UnixConn) {
 		return
 	}
 	e.UserOwned = rule.UserOwned
+
+	if rule.needsApproval() {
+		if out := s.awaitApproval(c, e, req); out != outApproved {
+			deny(out)
+			return
+		}
+		// bws と返事の分だけ、締め切りを延ばし直す。
+		c.SetDeadline(time.Now().Add(30 * time.Second))
+	}
 
 	value, err := s.bws.get(context.Background(), req.Secret, id)
 	if err != nil {
@@ -338,4 +372,45 @@ func clip(s string, n int) string {
 		return string(r[:n]) + "…"
 	}
 	return s
+}
+
+// awaitApproval は、要求を待ちに入れて知らせ、結果が決まるまで待つ。値はまだ取っていない。
+// 締め切りを延ばすのは、待ちに入ったこの接続だけ。
+func (s *server) awaitApproval(c *net.UnixConn, e auditEntry, req request) string {
+	pd := &pending{id: e.ID, agent: req.Agent, secret: req.Secret, command: req.Command, user: e.UserOwned, pid: e.PID, since: time.Now()}
+	if err := s.wait.add(pd); err != nil {
+		return "待ちが多すぎる"
+	}
+	if s.push != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err := s.push.send(ctx, pd)
+		cancel()
+		if err != nil {
+			s.wait.mu.Lock()
+			s.wait.remove(pd)
+			s.wait.mu.Unlock()
+			log.Printf("知らせられない id=%s: %v", e.ID, err)
+			return "Pushover で知らせられない"
+		}
+	}
+	log.Printf("承認待ち id=%s 番号=%s secret=%s command=%s 引数の数=%d", e.ID, pd.code, req.Secret, e.Command, e.Argc)
+	c.SetDeadline(time.Now().Add(approvalTimeout + 30*time.Second))
+	// run には ID だけを返す（番号は返さない）。
+	if _, err := fmt.Fprintf(c, "WAIT %s\n", e.ID); err != nil {
+		s.wait.mu.Lock()
+		ok := s.wait.remove(pd)
+		s.wait.mu.Unlock()
+		if ok {
+			return outGone
+		}
+		return <-pd.done
+	}
+	// run は要求の後に何も送らない。読めたら（切れたら）、見捨てられたとみなす。
+	gone := make(chan struct{})
+	go func() {
+		var b [1]byte
+		c.Read(b[:])
+		close(gone)
+	}()
+	return s.wait.wait(pd, approvalTimeout, gone, s.stop)
 }

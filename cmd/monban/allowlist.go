@@ -76,7 +76,13 @@ type allowRule struct {
 	Agents    []string `json:"agents"`
 	Hosts     []string `json:"hosts,omitempty"`
 	UserOwned bool     `json:"userOwned,omitempty"`
+	// Approval は承認の要り方（6段目）。空か "always" なら毎回、"none" なら承認なし（本人が明示した項目だけ）。
+	// "window"（時間枠）はまだ作っていないので、書かれていたら起動しない（黙って always にしない）。
+	Approval string `json:"approval,omitempty"`
 }
+
+// needsApproval は、この項目の要求に承認が要るか。
+func (r *allowRule) needsApproval() bool { return r.Approval != "none" }
 
 type secretRule struct {
 	Name  string      `json:"name"`
@@ -196,6 +202,13 @@ func parseAllowlist(b []byte) (*allowlist, error) {
 			}
 			if r.Hosts != nil && len(r.Hosts) == 0 {
 				return nil, fmt.Errorf("%s：hosts が空（付けないなら欄ごと消してください）", w)
+			}
+			switch r.Approval {
+			case "", "always", "none":
+			case "window":
+				return nil, fmt.Errorf("%s：approval の \"window\"（時間枠）はまだ使えない（\"always\" か \"none\"）", w)
+			default:
+				return nil, fmt.Errorf("%s：approval は \"always\" か \"none\": %q", w, r.Approval)
 			}
 		}
 		ids[s.ID] = true

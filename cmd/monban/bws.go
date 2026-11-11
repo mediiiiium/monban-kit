@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -49,7 +50,7 @@ func checkBws(path string) (string, error) {
 // どちらも自分の持ち物でなければ読まない。
 // bws の状態ファイルは、同じディレクトリの下の bws-home（0700）に置く。合言葉の置き場には、
 // 合言葉のファイルと bws-home のほかは何もない形にして、余計なものが増えたら気づけるようにする。
-func readToken(path string) (token, home string, err error) {
+func readToken(path string, others ...string) (token, home string, err error) {
 	if !filepath.IsAbs(path) {
 		return "", "", fmt.Errorf("合言葉のファイルは絶対パスにしてください: %s", path)
 	}
@@ -77,7 +78,7 @@ func readToken(path string) (token, home string, err error) {
 	}
 	if ents, err := os.ReadDir(dir); err == nil {
 		for _, e := range ents {
-			if n := e.Name(); n != filepath.Base(path) && n != "bws-home" {
+			if n := e.Name(); n != filepath.Base(path) && n != "bws-home" && !slices.Contains(others, n) {
 				log.Printf("注意：合言葉のディレクトリに、合言葉と bws-home のほかのものがある: %s", n)
 			}
 		}

@@ -26,6 +26,8 @@ type auditEntry struct {
 	Argc       int    `json:"argc"`              // 引数の数。全文は書かない（別の秘密が入りうる）
 	ArgsSHA256 string `json:"args_sha256,omitempty"`
 	UserOwned  bool   `json:"user_owned,omitempty"` // ユーザーの持ち物の場所のコマンドを許した項目で通した
+	Op         string `json:"op,omitempty"`         // approve・deny・show の接続（6段目）
+	Target     string `json:"target,omitempty"`     // その接続が決めた要求のリクエストの ID。承認の番号は書かない
 	Result     string `json:"result"`
 }
 
