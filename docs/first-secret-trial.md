@@ -104,7 +104,7 @@ BWS_ACCESS_TOKEN="$(security find-generic-password -a "$USER" -s monban-trial-bw
 
 ### 準備（2026-11-10）
 
-- アカウントは「今すぐ登録」（Secrets Manager の無料版）から作った。サーバーは bitwarden.com。登録の流れで組織が自動で作られた
+- アカウントは「今すぐ登録」（Secrets Manager の無料版）から作った。サーバーは bitwarden.com。登録の流れで組織を作った（名前は `monban`。自分で付けた）
 - 2段階認証は Password Manager の「設定」→「セキュリティ」→「2段階認証」で認証アプリを入れた。無料版でも FIDO2 WebAuthn の欄に「アップグレード」の印はなかった
 - 合言葉の期限は、選択肢に「7日」があった
 - `bws` v2.1.0 は照合 `OK`。署名の TeamIdentifier は `LTZ2PFU5D6`
