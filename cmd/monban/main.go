@@ -1,7 +1,8 @@
 // monban は、Bitwarden Secrets Manager の前に置く門番。
-// 8段目まで：daemon は許可リストで照らし、承認が要る項目は Pushover で知らせて monban approve を待ち、
+// 9段目まで：daemon は許可リストで照らし、承認が要る項目は Pushover で知らせて monban approve を待ち、
 // bws で秘密を取り出してログを足し、値を run に渡す。run は値を環境変数に入れてコマンドを exec する。
 // ログはハッシュの連鎖にし、verify-log で確かめる。stop は門番を止め、合言葉の失効の手順を出す。
+// 本番の形では _monban の launchd のデーモンとして動く（scripts/install.sh）。stop で止めたら、止めた印を消すまで起動しない。
 package main
 
 import (

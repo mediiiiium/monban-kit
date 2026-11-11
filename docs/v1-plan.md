@@ -7,6 +7,7 @@
 6段目の相談と回答：[muse-consult-approval.md](muse-consult-approval.md)、[muse-consult-approval-response.md](muse-consult-approval-response.md)
 7段目の相談と回答：[muse-consult-log-chain.md](muse-consult-log-chain.md)、[muse-consult-log-chain-response.md](muse-consult-log-chain-response.md)
 8段目の相談と回答：[muse-consult-kill-switch.md](muse-consult-kill-switch.md)、[muse-consult-kill-switch-response.md](muse-consult-kill-switch-response.md)
+9段目の相談と回答：[muse-consult-resident.md](muse-consult-resident.md)、[muse-consult-resident-response.md](muse-consult-resident-response.md)
 
 ## 決まり
 
@@ -255,6 +256,53 @@
      - 8段目の形では、止めた門番を誰かが起動し直せば動く。止まったままにするのは9段目の「止めた印」
      - `bws` の子のプロセスが出力を握ると待たされる癖は、普段の取り出しにもありうる。2秒で待つのをやめる直しは普段の道の時間切れ（15秒）でも効く形だが、普段の道では試していない（9〜10段目で見る）
 9. **常駐化**：`_monban` ユーザーの作成、LaunchDaemon の plist、ディレクトリと権限、合言葉のファイルの配置、入れ方と消し方
+   - 2026-11-11 に作った（`scripts/install.sh`・`scripts/uninstall.sh`、`daemon.go` の `-state-dir`・`refuseIfStopped`・`shutdown`）
+   - 形：
+     - ユーザー `_monban` と、ソケットに繋いでよい人のグループ `_monbanusers`。番号は uid と gid で同じにし、入れるときに 400番台で両方が空いているものを探す。決まった番号は `/usr/local/etc/monban/ids` に残し、消すときと入れ直すときに使う（`uninstall.sh` も消さない）
+     - 置き場：
+
+       | 何 | 置き場 | 持ち主:グループ | モード |
+       |---|---|---|---|
+       | `monban`・`bws` | `/usr/local/libexec/monban/`（`/usr/local/bin/monban` から指す） | root:wheel | 0755 |
+       | 許可リスト | `/usr/local/etc/monban/allowlist.json` | root:wheel | 0644 |
+       | 状態のディレクトリ（止めた印） | `/var/db/monban/` | _monban | 0700 |
+       | 合言葉・Pushover | `/var/db/monban/secret/token`・`pushover.json` | _monban | 0700 / 0600 |
+       | ソケット | `/var/db/monban-run/monban.sock` | _monban:_monbanusers | 0750 / 0660 |
+       | ログ | `/var/log/monban/audit.log` | _monban:_monbanusers | 0750 / 0640 |
+       | 門番の画面のログ | `/var/log/monban/daemon.log` | _monban | 0600 |
+
+     - launchd：`/Library/LaunchDaemons/io.github.mediiiiium.monban.plist`。`UserName` `_monban`、`GroupName` `_monbanusers`、`Umask` 077、`RunAtLoad`、`KeepAlive` `{SuccessfulExit: false}`。引数は全部 plist に書き、環境変数には何も入れない
+     - 止めた印：`monban stop` で止めたときだけ、停止の行の後・ソケットを消す前に `/var/db/monban/stopped`（0600）を置く。中身は時刻・理由・停止の行の seq とハッシュ（人が読むため）。合図で止めたとき・落ちたときは置かない
+     - 起動のとき、印があれば、ログに「止めた印があるので起動しなかった」の行（連鎖の決まりどおり、停止の行として）を足し、理由と解除の方法（`sudo rm /var/db/monban/stopped`）を画面のログに出し、Pushover で知らせて、正常に終わる（失敗で終わると `KeepAlive` が起き直させ続ける）。門番は印の有無だけを見て、中身は信じない
+     - 本番の形（門番の euid が `-owner-uid` と違う）では、`-pushover` と `-state-dir` がないと起動しない。`bws` の stderr は出さず、終了の仕方だけにする。試しの形（euid が同じ）は今のまま
+   - 決めたこと（Muse と相談して）：
+     - ソケットは `/var/db/monban-run/`。`/var/run` の下には `_monban` がディレクトリを作れない
+     - 本番でも、承認の番号は画面のログ（0600）に出す。Pushover が届かないときの承認の道を残す。`daemon.log` は launchd に作らせず、入れるときに先に作り、初めて起動した後に持ち主とモードを目で確かめる
+     - Pushover は本番の形で必須（ないと、番号は `sudo` でしか読めない場所にしか出ない）
+     - 入れ方はスクリプト1本。各ステップを画面に出しながら進み、既にあるユーザー・置き場が想定と違えば上書きせずに止まり、合言葉と Pushover のキーには触らない。`-n` で、打つコマンドを出すだけにもできる
+   - 自分の uid で確かめた（2026-11-11）：
+     - 単体の試験（`go test -race`）：`monban stop` で止めると、`stop` が「止まった」と言う時点で印がある。次の起動は1行足して断り、連鎖が合う。印の中身を変えても断る。印を消せば起動する。合図で止めたときは印を置かない。印の場所にシンボリックリンクがあれば書かない
+     - 8段目の宿題（普段の取り出しの待ち時間の上限）：偽の `bws` が子の `sleep` を残して出力を握る形で、時間切れ（試験では1秒）から2秒で待つのをやめた（合わせて3秒）。本番の形では stderr がエラーに出ない
+     - `install.sh -n`・`uninstall.sh -n` で、打つコマンドを見た（何も変えていない）
+   - 2026-11-11 に人のターミナルで、本番の形で確かめた（`sudo scripts/install.sh`。合言葉は偽の文字列、Pushover は本物、許可リストは偽の ID の `MONBAN_TEST` 1件）
+     - 入れる：全部のステップが画面に出て進み、`_monban` の番号は 401 になった。起動した後の持ち主とモードは想定どおり（ソケット `srw-rw----` `_monban:_monbanusers`、`daemon.log` `-rw-------` `_monban`、`audit.log` `-rw-r-----`、合言葉と Pushover のファイル `-rw-------`、`bws-home` は門番が 0700 で作った）
+     - 合言葉を `sudo -u _monban` で書くとき、今のディレクトリ（ホームの下）に `_monban` が入れず、`getcwd` の警告が出た（書けてはいた）。案内を `(cd / && …)` の形に直した
+     - エージェントの側（`sudo` なし）から：合言葉・Pushover のファイル・`daemon.log` は読めない（`Permission denied`）、`/var/db/monban` の中の一覧も出せない。`audit.log` は読める。門番は uid `_monban` で動いている
+     - エージェントは、グループに足す前から動いていたのに、もう `_monbanusers` に入っていた。macOS は、プロセスが起動した後でもグループを引き直すらしい。「グループに入ったのが効くのは新しいターミナルから」より早く効く。「本人の uid のエージェントはグループに入っている」前提は当たっている
+     - 承認：`run` → Pushover の「承認待ち」（名札・秘密・コマンド・引数の数が正しく出た）→ `monban approve` → `bws` が失敗（合言葉が偽物）→ `NG`。`bws` を呼んだのは承認の後。スマホが集中モードでバナーが出ず、最初の1回は届いていないと思って時間切れになった（アプリの一覧には届いていた）。例の番号 `12345678` をそのまま打った1回は「番号が外れた」で断った
+     - 落ちたとき：`launchctl kill SIGKILL` で、launchd が起き直させた（`runs = 2`、pid が変わった）。起動の行は「前回の停止の行がない（落ちたか、ログの末尾が消された）」
+     - 止めた印：`monban stop` で止まり（`last exit code = 0`、起き直さない）、`/var/db/monban/stopped`（`-rw-------` `_monban`）が置かれた。`launchctl kickstart` で起動させると、ログに「止めた印があるので起動しなかった」を足して終わった（`last exit code = 0`、`runs` は1回だけ増え、30秒以上たっても増えなかった）
+     - 印を消して `kickstart` すると起動した（`runs = 4`）。12行の連鎖が `verify-log` で合った
+     - スマホの知らせ：「起動」（seq 1・8・12）、「停止」（seq 10、「止めた印を置いた」つき）、「起動しなかった」（seq 11）のハッシュの頭が、どれも `verify-log` と同じだった。「承認待ち」は、待つ時間と同じ期限（ttl）で送るので、後で一覧から消えていた（6段目の作りどおり）
+     - 再起動（Mac を入れ直す）をまたいで印が効くかは、まだ試していない。門番の作りでは、起動のたびに印を見るので、launchd の `RunAtLoad` でも同じはず
+   - これで防げないこと：
+     - 本人の uid のエージェントは、`_monbanusers` に入っているので、ソケットに繋げて、ログ（0640）を読める。ソケットに繋げても、要求は許可リストと承認の対象のまま。守りは、合言葉・Pushover のファイル・画面のログ（承認の番号）が読めないことと、許可リストを書き換えられないこと
+     - `_monbanusers` に人を足すと、その人もソケットとログに届く
+     - `sudo` を取れれば、全部守れない（モデルの外）。本人が `sudo` を打つ場面（入れる・消す・止めた印を消す・許可リストを直す）で、エージェントが同じターミナルにいないこと
+     - 許可リストは root の持ち物なので、直すたびに `sudo` が要る。面倒で `approval: none` を増やしたくなる
+     - 設定の誤りで起動に失敗すると、`KeepAlive` が10秒ごとに起き直させ続ける（ログの連鎖には、起動の行を書く前に落ちる誤りなら何も増えない。画面のログは増える）
+     - 番号の空きは、この Mac の中のユーザーとグループだけで探す（会社の LDAP などのユーザーとは照らさない）
+     - 入れる `monban` のバイナリと許可リストは、本人の uid で作る。`install.sh` が写す前に、同じ uid のエージェントが差し替えられる（`bws` は署名を確かめるので差し替えられない）。作るのも入れるのも、エージェントのいないウィンドウで続けて行い、入れた後に `/usr/local/etc/monban/allowlist.json` を目で見る
 10. **本番の形でもう一度確かめる**：launchd のデーモン・`_monban`・`bws` で、実験1（`ps eww` で合言葉が見えないか）をやり直す。見えるかどうかはバイナリの署名の性質にもよるので、自作の Go のバイナリでも確かめる
 
 ## これで防げないこと（v1）

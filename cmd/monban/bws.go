@@ -27,8 +27,13 @@ const bwsRequirement = `anchor apple generic and identifier "bws" and certificat
 type bwsClient struct {
 	path  string // 確かめた本当の場所
 	token string
-	home  string // bws の状態ファイルの置き場（HOME として渡す）。合言葉のディレクトリの下の bws-home
+	home  string        // bws の状態ファイルの置き場（HOME として渡す）。合言葉のディレクトリの下の bws-home
+	quiet bool          // 本番の形：bws の stderr を出さず、終了の仕方だけにする
+	limit time.Duration // 1回の取り出しの時間切れ。0 なら bwsTimeout（試験で縮める）
 }
+
+// bwsTimeout は、1回の取り出しの時間切れ。
+const bwsTimeout = 15 * time.Second
 
 // checkBws は、bws の置き場をたどり、署名を確かめて、本当の場所を返す。
 // 置き場を root か自分しか書き換えられないことは trustedPath で確かめる。
@@ -101,7 +106,11 @@ var errBws = errors.New("bws が失敗した")
 // get は、ID の秘密を取り出し、名前が合っているかも確かめて、値を返す。
 // エラーには値も合言葉も入れない。
 func (b *bwsClient) get(ctx context.Context, name, id string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	limit := b.limit
+	if limit == 0 {
+		limit = bwsTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, b.path, "secret", "get", id, "--output", "json", "--color", "no")
 	cmd.Env = []string{"BWS_ACCESS_TOKEN=" + b.token, "HOME=" + b.home}
@@ -113,7 +122,13 @@ func (b *bwsClient) get(ctx context.Context, name, id string) (string, error) {
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		// stderr はエラーの説明だけのはずだが、念のため合言葉を伏せ、最初の段落（「Error:」と理由）・200 バイトまでにする。
-		// 本番（常駐化の段）では生の stderr を出さず、失敗の分類と終了コードだけにする。
+		// 本番の形では stderr を出さず、終了の仕方（終了コードか、時間切れ・取り消し）だけにする。
+		if b.quiet {
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("%w（%v、%v）", errBws, err, ctx.Err())
+			}
+			return "", fmt.Errorf("%w（%v）", errBws, err)
+		}
 		para, _, _ := strings.Cut(strings.TrimSpace(redact(stderr.String(), b.token)), "\n\n")
 		msg := strings.Join(strings.Fields(para), " ")
 		if len(msg) > 200 {

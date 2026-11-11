@@ -8,6 +8,9 @@ package main
 // 6段目：承認が要る項目は、待ちにして Pushover で知らせ、monban approve の後で初めて bws から取る。
 // 8段目：キルスイッチ。monban stop の接続（持ち主の uid から）で、新しい要求を受けるのをやめ、
 // 待っている要求を断り、取り出し中の bws を止め、まだ渡していない値は渡さずに止まる。
+// 9段目：常駐化。monban stop で止めたときは、状態のディレクトリに「止めた印」を置き、印があれば起動しない
+// （ログに1行書いて、正常に終わる。launchd の KeepAlive が起き直させないように）。
+// 本番の形（門番の euid が持ち主の uid と違う）では、Pushover と状態のディレクトリを必須にし、bws の stderr を出さない。
 
 import (
 	"bufio"
@@ -43,7 +46,11 @@ const (
 )
 
 // defaultSocket は本番（常駐化の段）での置き場。試すときは -socket で変える。
-const defaultSocket = "/var/run/monban/monban.sock"
+// /var/run の下には _monban がディレクトリを作れないので、消えない /var/db の下に、入れるときに作る（9段目、Muse と決めた）。
+const defaultSocket = "/var/db/monban-run/monban.sock"
+
+// stoppedName は、止めた印のファイルの名前（状態のディレクトリの中）。
+const stoppedName = "stopped"
 
 type server struct {
 	owner uint32
@@ -60,13 +67,16 @@ type server struct {
 	ln       *net.UnixListener
 	haltOnce sync.Once
 	why      string // 何で止めたか（停止の行と知らせに書く）
+	mark     bool   // 止めた印を置くか（monban stop で止めたときだけ）
 }
 
 // halt は、門番を止め始める。何度呼んでもよい（最初の理由だけを残す）。
 // 新しい接続を受けるのをやめ、待っている要求を断り、取り出し中の bws を止める。
-func (s *server) halt(why string) {
+// mark は、止めた印を置くか（monban stop のときだけ。合図や落ちたときは置かない）。
+func (s *server) halt(why string, mark bool) {
 	s.haltOnce.Do(func() {
 		s.why = why
+		s.mark = mark
 		close(s.stop)
 		s.cancel()
 		if s.ln != nil {
@@ -93,7 +103,8 @@ func runDaemon(args []string) error {
 	tokenFile := fl.String("token-file", "", "合言葉のファイル（必須。0700 のディレクトリの中の 0600）")
 	allowFile := fl.String("allowlist", "", "許可リスト（必須。JSON。本番は root の持ち物の 0644）")
 	logFile := fl.String("log", "", "ログのファイル（必須）")
-	pushFile := fl.String("pushover", "", "Pushover のトークンとユーザーキーの JSON（0700 のディレクトリの中の 0600）。なければ知らせず、承認の番号は画面のログにだけ出す")
+	pushFile := fl.String("pushover", "", "Pushover のトークンとユーザーキーの JSON（0700 のディレクトリの中の 0600）。なければ知らせず、承認の番号は画面のログにだけ出す（本番の形では必須）")
+	stateDir := fl.String("state-dir", "", "状態のディレクトリ（自分の持ち物の 0700）。止めた印を置く。なければ印を使わない（本番の形では必須）")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
@@ -106,6 +117,27 @@ func runDaemon(args []string) error {
 		if f.v == "" {
 			return fmt.Errorf("%s を指定してください", f.name)
 		}
+	}
+
+	// 本番の形：門番が持ち主とは別の uid（_monban）で動いている。
+	// 承認の番号は、_monban しか読めない画面のログにしか出ないので、Pushover がないと承認できない。
+	// キルスイッチを再起動の後も効かせるには、止めた印の置き場が要る。
+	production := uint32(os.Geteuid()) != uint32(*ownerUID)
+	if production && *pushFile == "" {
+		return errors.New("本番の形（門番の uid が -owner-uid と違う）では -pushover が要る（ないと、承認の番号を受け取る道がない）")
+	}
+	if production && *stateDir == "" {
+		return errors.New("本番の形（門番の uid が -owner-uid と違う）では -state-dir が要る（ないと、monban stop で止めても再起動で動き出す）")
+	}
+	var marker string
+	if *stateDir != "" {
+		if !filepath.IsAbs(*stateDir) {
+			return fmt.Errorf("状態のディレクトリは絶対パスにしてください: %s", *stateDir)
+		}
+		if err := checkPrivate(*stateDir, 0o700, true); err != nil {
+			return fmt.Errorf("状態のディレクトリ: %w", err)
+		}
+		marker = filepath.Join(*stateDir, stoppedName)
 	}
 
 	bwsReal, err := checkBws(*bwsPath)
@@ -139,6 +171,13 @@ func runDaemon(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 止めた印があれば起動しない。門番は「あるかないか」だけを見る（中身は人が読むための表示で、信じない）。
+	// 連鎖の決まりどおりに1行足してから、正常に終わる（失敗で終わると、launchd の KeepAlive が起き直させ続ける）。
+	if marker != "" {
+		if refused, err := refuseIfStopped(marker, audit, push); refused || err != nil {
+			return err
+		}
+	}
 	// 止める合図の受け口は、起動の行を書く前に作る。後にすると、起動の行と停止の行の間に届いた合図で、
 	// 停止の行を書かずに落ちる（届いた合図は sig に残り、待ち受けを始めたらすぐ止める）。
 	sig := make(chan os.Signal, 1)
@@ -154,7 +193,7 @@ func runDaemon(args []string) error {
 	}
 	srv := &server{
 		owner: uint32(*ownerUID),
-		bws:   &bwsClient{path: bwsReal, token: token, home: home},
+		bws:   &bwsClient{path: bwsReal, token: token, home: home, quiet: production},
 		allow: allow,
 		audit: audit,
 		push:  push,
@@ -179,11 +218,11 @@ func runDaemon(args []string) error {
 	// 起動の知らせに、ログの連鎖の今の先頭を載せる（門番の外の写し）。送れなくても動く。
 	seq, h := audit.head()
 	log.Printf("ログ seq %d ハッシュ %s", seq, h)
-	srv.notify("monban 起動", fmt.Sprintf("門番を起動した\nログ seq %d\nハッシュ %s", seq, h[:16]))
+	srv.notify("monban 起動", fmt.Sprintf("門番を起動した\nログ seq %d\nハッシュ %s", seq, short(h)))
 	srv.ln = ln
 	go func() {
 		s := <-sig
-		srv.halt("合図 " + s.String())
+		srv.halt("合図 "+s.String(), false)
 	}()
 
 	log.Printf("待ち受け開始 socket=%s owner-uid=%d bws=%s 秘密の数=%d Pushover=%v", *sockPath, *ownerUID, bwsReal, len(allow.secrets), push != nil)
@@ -193,7 +232,7 @@ func runDaemon(args []string) error {
 			if errors.Is(err, net.ErrClosed) {
 				break
 			}
-			srv.halt("待ち受けが失敗した")
+			srv.halt("待ち受けが失敗した", false)
 			srv.conns.Wait()
 			audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "待ち受けが失敗して止めた"})
 			os.Remove(*sockPath)
@@ -205,17 +244,91 @@ func runDaemon(args []string) error {
 			srv.handle(c)
 		}()
 	}
+	srv.shutdown(marker, *sockPath)
+	return nil
+}
+
+// shutdown は、止め始めた後の片づけ。動いている接続が終わるのを待ち、停止の行を書き、
+// monban stop で止めたなら止めた印を置き、ソケットを消して、知らせる。
+func (s *server) shutdown(marker, sock string) {
 	// 待っている要求は stop で断られ、取り出し中の bws は取り消される。動いている接続も締め切り（30秒）までに終わる。
-	srv.conns.Wait()
-	seq, h, err = audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "門番を止めた（" + srv.why + "）"})
+	s.conns.Wait()
+	seq, h, err := s.audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "門番を止めた（" + s.why + "）"})
 	if err != nil {
 		log.Printf("停止の行を書けない: %v", err)
 	}
+	// 止めた印は、停止の行の後、ソケットを消す前に置く（monban stop が「止まった」と言うときには、印がある）。
+	markNote := ""
+	if s.mark && marker != "" {
+		if err := writeMarker(marker, s.why, seq, h); err != nil {
+			log.Printf("注意！！ 止めた印を置けない（再起動で動き出す）: %v", err)
+			markNote = "\n注意：止めた印を置けなかった"
+		} else {
+			log.Printf("止めた印を置いた: %s（解除は sudo rm %s）", marker, marker)
+			markNote = "\n止めた印を置いた"
+		}
+	}
 	// ソケットは停止の行を書いてから消す。monban stop は、ソケットが消えたのを見て「止まった」と言う。
-	os.Remove(*sockPath)
-	log.Printf("止めた（%s） ログ seq %d ハッシュ %s", srv.why, seq, h)
-	srv.notify("monban 停止", fmt.Sprintf("門番を止めた（%s）\nログ seq %d\nハッシュ %s", srv.why, seq, h[:16]))
-	return nil
+	os.Remove(sock)
+	log.Printf("止めた（%s） ログ seq %d ハッシュ %s", s.why, seq, h)
+	s.notify("monban 停止", fmt.Sprintf("門番を止めた（%s）\nログ seq %d\nハッシュ %s%s", s.why, seq, short(h), markNote))
+}
+
+// short は、知らせに載せるハッシュの頭（16文字）。
+func short(h string) string {
+	if len(h) > 16 {
+		return h[:16]
+	}
+	return h
+}
+
+// refuseIfStopped は、止めた印があれば、ログに1行足して（連鎖の決まりどおり、停止の行として）閉じ、true を返す。
+// 門番は「あるかないか」だけを見る（中身は人が読むための表示で、信じない）。
+// 印があるときは正常に終わる（失敗で終わると、launchd の KeepAlive が起き直させ続ける）。
+func refuseIfStopped(marker string, audit *auditLog, push *pushover) (bool, error) {
+	_, err := os.Lstat(marker)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "止めた印を確かめられずに起動しなかった"})
+		return true, fmt.Errorf("止めた印を確かめられない: %w", err)
+	}
+	seq, h, err := audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "止めた印があるので起動しなかった"})
+	if err != nil {
+		log.Printf("ログに書けない: %v", err)
+	}
+	log.Printf("止めた印があるので起動しない: %s（ログ seq %d ハッシュ %s）", marker, seq, h)
+	log.Printf("印の中身（表示だけ。門番は中身を信じない）:\n%s", markerText(marker))
+	log.Printf("疑いが晴れたら、印を消してから起動する: sudo rm %s", marker)
+	(&server{push: push}).notify("monban 起動しなかった", fmt.Sprintf("止めた印があるので起動しなかった\nログ seq %d\nハッシュ %s", seq, short(h)))
+	return true, nil
+}
+
+// writeMarker は、止めた印を置く。中身は人が読むためのもの（門番は有無だけを見る）。
+func writeMarker(path, why string, seq uint64, h string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(f, "門番を止めた印（monban stop）\n時刻 %s\n理由 %s\n停止の行 seq %d ハッシュ %s\n"+
+		"この印がある間、門番は起動しない。疑いが晴れたら消す: sudo rm %s\n",
+		time.Now().Format(time.RFC3339), why, seq, h, path)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// markerText は、印の中身を表示用に読む（1 KiB まで）。読めなければ、そう書く。
+func markerText(path string) string {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return "（読めない: " + err.Error() + "）"
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, 1024))
+	return strings.ToValidUTF8(string(b), "?")
 }
 
 // notify は、起動と停止の知らせ。Pushover がなければ何もしない。送れなくても画面のログに出すだけ。
@@ -482,7 +595,7 @@ func (s *server) handleKill(c net.Conn, e auditEntry, p peer) {
 	}
 	log.Printf("止める要求 id=%s uid=%d pid=%d", e.ID, p.uid, p.pid)
 	fmt.Fprintf(c, "OK %s\n", e.ID)
-	s.halt(fmt.Sprintf("monban stop、uid %d pid %d", p.uid, p.pid))
+	s.halt(fmt.Sprintf("monban stop、uid %d pid %d", p.uid, p.pid), true)
 }
 
 // clip は、ログに書く申告の文字列を n 文字までにする。

@@ -52,12 +52,10 @@ func newTestServer(t *testing.T, owner uint32) (*server, string, string) {
 
 func TestKill(t *testing.T) {
 	srv, sock, logPath := newTestServer(t, uint32(os.Getuid()))
-	// 門番の代わりに、止め始めたら停止の行を書いてソケットを消す。
+	// 門番と同じく、止め始めたら片づける（印の置き場なし）。
 	go func() {
 		<-srv.stop
-		srv.conns.Wait()
-		srv.audit.close(auditEntry{Result: "門番を止めた（" + srv.why + "）"})
-		os.Remove(sock)
+		srv.shutdown("", sock)
 	}()
 	var out bytes.Buffer
 	if err := stopDaemon(&out, sock, 5*time.Second); err != nil {
@@ -72,7 +70,7 @@ func TestKill(t *testing.T) {
 	if !strings.HasPrefix(srv.why, "monban stop、uid ") {
 		t.Fatalf("止めた理由: %q", srv.why)
 	}
-	srv.halt("2回目") // 2回呼んでも落ちず、最初の理由が残る
+	srv.halt("2回目", false) // 2回呼んでも落ちず、最初の理由が残る
 	if !strings.HasPrefix(srv.why, "monban stop") {
 		t.Fatalf("理由が上書きされた: %q", srv.why)
 	}
@@ -102,7 +100,7 @@ func TestKillOtherUID(t *testing.T) {
 	if !strings.HasPrefix(line, "NG ") || srv.stopped() {
 		t.Fatalf("持ち主ではない uid の止める要求を通した: %q", line)
 	}
-	srv.halt("後片づけ")
+	srv.halt("後片づけ", false)
 }
 
 // 止め始めた後の要求は、許可リストより前で断られ、bws まで届かない。
@@ -154,7 +152,7 @@ func TestKillDuringBws(t *testing.T) {
 	c.Write([]byte(`{"agent":"a","secret":"MONBAN_TEST","command":["/usr/bin/printenv","MONBAN_TEST"]}` + "\n"))
 	time.Sleep(500 * time.Millisecond) // bws が動き始めるまで
 	t0 := time.Now()
-	srv.halt("試し")
+	srv.halt("試し", false)
 	line, _ := bufio.NewReader(c).ReadString('\n')
 	c.Close()
 	if !strings.HasPrefix(line, "NG ") {
