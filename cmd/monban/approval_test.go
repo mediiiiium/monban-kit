@@ -180,6 +180,13 @@ func TestPushover(t *testing.T) {
 	if strings.Contains(msg, "Authorization") || strings.Contains(msg, "api.example.com") {
 		t.Fatalf("引数を送った: %q", msg)
 	}
+	// 起動と停止の知らせは、連鎖の写しとして残すので ttl を付けない。
+	if err := po.note(context.Background(), "monban 起動", "ログ seq 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := form["ttl"]; ok || form["message"][0] != "ログ seq 1" {
+		t.Fatalf("起動の知らせ: %v", form)
+	}
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		w.Write([]byte(`{"status":0}`))

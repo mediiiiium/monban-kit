@@ -256,12 +256,24 @@ func pushoverMessage(p *pending) (title, body string) {
 // エラーにはトークンを入れない（送る中身は本文で、URL には入れていない）。
 func (po *pushover) send(ctx context.Context, p *pending) error {
 	title, body := pushoverMessage(p)
+	return po.post(ctx, title, body, approvalTimeout)
+}
+
+// note は、起動と停止の知らせ。ログの連鎖の写しを門番の外に残すので、ttl を付けない（消えないように）。
+// 承認の番号は入らない。
+func (po *pushover) note(ctx context.Context, title, body string) error {
+	return po.post(ctx, title, body, 0)
+}
+
+func (po *pushover) post(ctx context.Context, title, body string, ttl time.Duration) error {
 	form := url.Values{
 		"token":   {po.token},
 		"user":    {po.user},
 		"title":   {title},
 		"message": {body},
-		"ttl":     {strconv.Itoa(int(approvalTimeout / time.Second))},
+	}
+	if ttl > 0 {
+		form.Set("ttl", strconv.Itoa(int(ttl/time.Second)))
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", po.endpoint, strings.NewReader(form.Encode()))
 	if err != nil {

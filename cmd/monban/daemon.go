@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,8 +49,9 @@ type server struct {
 	allow *allowlist
 	audit *auditLog
 	wait  waitList
-	push  *pushover     // nil なら知らせず、番号は画面のログにだけ出す（試すとき用）
-	stop  chan struct{} // 止めるときに閉じる（待っている要求を断る）
+	push  *pushover      // nil なら知らせず、番号は画面のログにだけ出す（試すとき用）
+	stop  chan struct{}  // 止めるときに閉じる（待っている要求を断る）
+	conns sync.WaitGroup // 動いている接続。止めるときは、全部終わってから停止の行を書く
 }
 
 func runDaemon(args []string) error {
@@ -97,9 +99,27 @@ func runDaemon(args []string) error {
 			return err
 		}
 	}
-	audit, err := openAudit(*logFile)
+	// ログを 0640 にするときのグループは、ソケットの置き場と同じ専用グループに限る。
+	sockDir, err := os.Lstat(filepath.Dir(*sockPath))
+	if err != nil {
+		return fmt.Errorf("ソケットの置き場: %w", err)
+	}
+	audit, prior, err := openAudit(*logFile, sockDir.Sys().(*syscall.Stat_t).Gid)
 	if err != nil {
 		return err
+	}
+	// 止める合図の受け口は、起動の行を書く前に作る。後にすると、起動の行と停止の行の間に届いた合図で、
+	// 停止の行を書かずに落ちる（届いた合図は sig に残り、待ち受けを始めたらすぐ止める）。
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	// 起動の行。前回の停止の行がないなら、落ちたか、ログの末尾が消された（区別はできない）。
+	start := auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Op: opStart, Result: "門番を起動した"}
+	if prior.Lines > 0 && prior.LastOp != opStop {
+		start.Result = "門番を起動した。前回の停止の行がない（落ちたか、ログの末尾が消された）"
+		log.Printf("注意！！ ログの最後（seq %d）が停止の行ではない。前回の門番が落ちたか、ログの末尾が消された（区別はできない）", prior.Lines)
+	}
+	if err := audit.write(start); err != nil {
+		return fmt.Errorf("ログに書けない: %w", err)
 	}
 	srv := &server{
 		owner: uint32(*ownerUID),
@@ -120,11 +140,15 @@ func runDaemon(args []string) error {
 
 	ln, err := listenChecked(*sockPath)
 	if err != nil {
+		// 起動の行を書いた後なので、停止の行も書いておく（次の起動で「停止の行がない」と出ないように）。
+		audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "待ち受けを始められずに止めた"})
 		return err
 	}
+	// 起動の知らせに、ログの連鎖の今の先頭を載せる（門番の外の写し）。送れなくても動く。
+	seq, h := audit.head()
+	log.Printf("ログ seq %d ハッシュ %s", seq, h)
+	srv.notify("monban 起動", fmt.Sprintf("門番を起動した\nログ seq %d\nハッシュ %s", seq, h[:16]))
 	// 止めるときにソケットを消す。
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sig
 		close(srv.stop)
@@ -137,12 +161,36 @@ func runDaemon(args []string) error {
 		c, err := ln.AcceptUnix()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				log.Printf("止めた")
-				return nil
+				break
 			}
 			return err
 		}
-		go srv.handle(c)
+		srv.conns.Add(1)
+		go func() {
+			defer srv.conns.Done()
+			srv.handle(c)
+		}()
+	}
+	// 待っている要求は stop で断られる。動いている接続も締め切り（30秒）までに終わる。
+	srv.conns.Wait()
+	seq, h, err = audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "門番を止めた"})
+	if err != nil {
+		log.Printf("停止の行を書けない: %v", err)
+	}
+	log.Printf("止めた ログ seq %d ハッシュ %s", seq, h)
+	srv.notify("monban 停止", fmt.Sprintf("門番を止めた\nログ seq %d\nハッシュ %s", seq, h[:16]))
+	return nil
+}
+
+// notify は、起動と停止の知らせ。Pushover がなければ何もしない。送れなくても画面のログに出すだけ。
+func (s *server) notify(title, body string) {
+	if s.push == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := s.push.note(ctx, title, body); err != nil {
+		log.Printf("%s の知らせを送れない: %v", title, err)
 	}
 }
 
