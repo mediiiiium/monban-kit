@@ -30,6 +30,7 @@
 - トークンも合言葉も、このリポジトリにも AI との会話にも貼らない。値を入れるのは Bitwarden のウェブの画面と、**エージェントのいない新しいウィンドウ**だけ
 - 秘密の ID（UUID の形）は秘密ではない。合言葉は `0.` で始まる長い文字列で、ID とは別のもの
 - 承認の番号が出ている画面は、まだ有効なうちは貼らない
+- `sudo` が聞くのは Mac のログインのパスワード（Bitwarden のマスターパスワードでも合言葉でもない）
 - `sudo -v` は単独で打ち、パスワードを入れてから残りを貼る。`read` の行は1行ずつ打つ（後ろの行を一緒に貼ると、それが入力として読まれる）
 - 終わったら `sudo -k`
 - マシンアカウントは Can read だけ（変えない決まり。新しく作るものも同じ）
@@ -46,7 +47,7 @@
 1. 組織 `monban` の Secrets Manager で、新しいプロジェクトを作る（例：`local-notify`）
 2. そのプロジェクトに秘密を1つ作る。名前は `PUSHOVER_TOKEN`、値は手順1のトークン
 3. 作った秘密の ID を控える（秘密ではない）
-4. **マシンアカウントを新しく作る**（例：`monban-gatekeeper`）。「Projects」に `local-notify` と `MONBAN_TEST` のプロジェクトを、どちらも **Can read** で足す
+4. **マシンアカウントを新しく作る**（例：`monban-gatekeeper`）。「Projects」に `local-notify` と、`MONBAN_TEST` の入っているプロジェクト（`monban-trial`）を、どちらも **Can read** で足す
 5. 新しいマシンアカウントの「Access tokens」で、新しい合言葉を作る。1回だけ出るので、手順4で入れるまで画面を閉じない
 6. 古いマシンアカウントには**何も足さない**。古い合言葉は、まだ失効させない（新しい合言葉で動くのを確かめてから。手順5）
 
@@ -88,6 +89,8 @@ ls -l /usr/local/libexec/monban-cmds/pushover-notify
 ```sh
 read 'ID?PUSHOVER_TOKEN の ID: '
 ```
+
+（この行はそのまま打つ。`'…'` は問いかけの文で、ID は書かない。`PUSHOVER_TOKEN の ID: ` と出て止まったところで、ID を貼って Enter）
 
 ```sh
 echo "$ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' && echo "形：OK" || echo "形：違う"
@@ -216,4 +219,28 @@ sudo -k
 
 ## 結果
 
-（まだ行っていない）
+2026-11-12 の 22:38〜23:05 に、手順のとおり人のターミナル（zsh）で行った。エージェントのいないウィンドウを2つ使った（`monban run` の側と `monban approve` の側）。
+
+**最初の本物の秘密が、門番を通って使えた。合言葉は新しいマシンアカウントのものに替わり、古い合言葉は失効させた。**
+
+- Pushover：手元用のアプリ `monban-local` を作った
+- Secrets Manager：プロジェクト `local-notify` に秘密 `PUSHOVER_TOKEN`（ID `d87ae4de-79ec-45d7-8911-b50000e21797`）を入れた。新しいマシンアカウント `monban-gatekeeper` に、`local-notify` と `monban-trial`（`MONBAN_TEST` の入っているプロジェクト）を、どちらも読み取り可能で割り当てた。`monban-trial` に入っているのは `MONBAN_TEST` だけ
+- コマンド：`git status` と `git diff` が何も出さないのを見てから写した。`cmp` で同じ中身。ディレクトリは root wheel の `drwxr-xr-x`、ファイルは root wheel の `-rwxr-xr-x`
+- 許可リスト：`MONBAN_TEST` の項目は前と同じで、`PUSHOVER_TOKEN` の項目が1つ増えた。root wheel の `-rw-r--r--` のまま
+- 合言葉：22:56 に書き換えた（`_monban` の `-rw-------`、`0.` で始まる行が1行）。起動し直した後は `state = running`、`last exit code = 0`
+- 5-1（新しい合言葉で `MONBAN_TEST`）：承認の後に `hello-monban` が出た（ログの seq 30）
+- 5-2（本物の秘密）：承認の画面に、秘密 `PUSHOVER_TOKEN`、コマンド `/usr/local/libexec/monban-cmds/pushover-notify`、引数2つ（本文と題名）が出た。承認の後に `送った` と Pushover の request の ID が出た。トークンは画面に出なかった（ログの seq 33、`argc` 2、値は書かれていない）
+- 5-3：古いマシンアカウント `mac-trial` の合言葉（2026-11-11 に作った `monban-daemon`）を取り消した（アクセストークンが 0 になった）。取り消した後に `MONBAN_TEST` をもう一度取り出し、`hello-monban` が出た（リクエストの ID `a00c13aa79ef`）
+- ログ：取り消しの前の時点で `monban verify-log` は「連鎖は合っている：36 行」。どの要求も、承認の画面に出した → 承認された → 渡した、の順。最後の行が停止の行ではないという注意は、門番が動いているので想定どおり
+
+言えること・言えないこと：
+
+- 確かめたのは、本物の秘密が許可リストと承認を通って注入先のコマンドに届き、コマンドがトークンを出さずに使えたこと。Pushover の API が受け付け（request の ID）、スマホに `monban-local` から「門番を通った1本目」が届いた
+- 古い合言葉は、門番の手順のどの画面にも出していない。取り消した後の取り出しが通ったことで、門番が使っているのが新しいマシンアカウントの合言葉だとわかる（古い合言葉は `local-notify` に届かないので、5-2 が通った時点でも言えた）
+- 名札はどの要求も「名乗らず」。Claude Code から使う回は、まだやっていない
+
+### 手順書を直したところ
+
+- `read 'ID?…'` の `'…'` に ID を書きそうになった。問いかけの文だと書き足した
+- `sudo` が聞くパスワードが何かを書き足した
+- `MONBAN_TEST` の入っているプロジェクトの名前（`monban-trial`）を書き足した
