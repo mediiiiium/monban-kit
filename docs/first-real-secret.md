@@ -254,6 +254,15 @@ sudo -k
 - 名札は申告で、Claude Code が `MONBAN_AGENT` を付けたから `claude` と出た。付けなければ「名乗らず」になり、別の名前も名乗れる。名札は記録と承認の判断の材料で、守りではない（守りは人の承認）
 - 承認の画面の pid とログの pid が同じなので、人が見て承認した要求と、値が渡った要求は同じもの
 
+### 古いマシンアカウントを消した
+
+同じ日の 23:16 より前に、もう使わない `mac-trial` を Bitwarden のウェブの画面で消した（合言葉は 5-3 で取り消し済み）。
+
+- 消す前：`mac-trial` の合言葉が 0 件なのは 5-3 で見ている
+- 消した後の画面（23:17）：マシンアカウントは `monban-gatekeeper` の1つだけ。`local-notify` と `monban-trial` の両方を読み取り可能で割り当ててあり、アクセストークンは1つ
+- 消しても、プロジェクト `monban-trial` と秘密 `MONBAN_TEST` は残る
+- 消した後に、人のターミナルで `monban run MONBAN_TEST -- /usr/bin/printenv MONBAN_TEST` を承認つきで通し、`hello-monban` が出た（リクエストの ID `af06dbc826dc`。ログの seq 43 → 44 → 45）。`monban verify-log` は「連鎖は合っている：45 行、12924 バイト」
+
 ### 手順書を直したところ
 
 - `read 'ID?…'` の `'…'` に ID を書きそうになった。問いかけの文だと書き足した
