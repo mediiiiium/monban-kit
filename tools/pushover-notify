@@ -1,0 +1,51 @@
+#!/usr/bin/python3 -I
+"""Pushover に1本送る（門番の最初の本物の秘密を通すためのコマンド）。標準ライブラリだけ。
+
+  monban run PUSHOVER_TOKEN -- /usr/local/libexec/monban-cmds/pushover-notify <本文> [題名]
+
+環境変数:
+  PUSHOVER_TOKEN  門番が入れる（手元用に発行したアプリのトークン）
+  PUSHOVER_USER   人が入れる（ユーザーキー。アカウントを指す名前で、トークンほど危なくない）
+
+- トークンとユーザーキーは、画面にも例外の文にも出さない（伏せる処理は v1.5 なので、出さない作りにしておく）
+- -I：PYTHONPATH など PYTHON で始まる環境変数と、ユーザーの site-packages を読まない
+- 入れる先は root の持ち物の場所（docs/first-real-secret.md）。~/ に置くと同じ uid から中身を替えられる
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API = "https://api.pushover.net/1/messages.json"
+
+
+def main():
+    if len(sys.argv) not in (2, 3) or not sys.argv[1]:
+        sys.exit("使い方: pushover-notify <本文> [題名]")
+    token = os.environ.get("PUSHOVER_TOKEN", "").strip()
+    user = os.environ.get("PUSHOVER_USER", "").strip()
+    if not token:
+        sys.exit("PUSHOVER_TOKEN が無い（monban run から呼ぶ）")
+    if not user:
+        sys.exit("PUSHOVER_USER が無い")
+    payload = {"token": token, "user": user, "message": sys.argv[1]}
+    if len(sys.argv) == 3 and sys.argv[2]:
+        payload["title"] = sys.argv[2]
+    req = urllib.request.Request(API, data=urllib.parse.urlencode(payload).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as res:
+            body = json.loads(res.read().decode())
+    except urllib.error.HTTPError as e:
+        # 本文には理由（トークンが不正、など）だけが入る。キーそのものは返ってこない
+        sys.exit(f"Pushover HTTP {e.code}: {e.read().decode()[:300]}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        sys.exit(f"Pushover に届かない: {type(e).__name__}")
+    if body.get("status") != 1:
+        sys.exit(f"Pushover が受け付けなかった: {body.get('errors') or body.get('status')}")
+    print("送った", body.get("request", ""))
+
+
+if __name__ == "__main__":
+    main()
