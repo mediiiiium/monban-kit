@@ -200,7 +200,7 @@ sudo -k
 
 人のターミナルで通った後に、Claude Code から1回使う（[design.md](design.md) の「次の一手」の「1本だけ手で通す」）。
 
-- Claude Code には `MONBAN_AGENT=claude monban run PUSHOVER_TOKEN -- /usr/local/libexec/monban-cmds/pushover-notify "<本文>"` を打たせる。`PUSHOVER_USER` は、Claude Code を起こすシェルで先に入れておく
+- Claude Code には `MONBAN_AGENT=claude monban run PUSHOVER_TOKEN -- /usr/local/libexec/monban-cmds/pushover-notify "<本文>"` を打たせる。`PUSHOVER_USER` は、Claude Code を起こすシェルで先に入れておくか、人がエージェントのいないウィンドウでファイルに書き、コマンドの中で `PUSHOVER_USER="$(cat ~/.config/monban-pushover-user)"` として読む（値を Claude Code の画面やチャットに出さないため。同じ uid から読めるのは、トークンほど危なくないので受け入れる）
 - 承認は人がエージェントのいないウィンドウで打つ。承認の画面に出る名札（`claude`）・コマンド・引数を見てから承認する
 - ログの名札が `claude` になっていること
 
@@ -237,7 +237,22 @@ sudo -k
 
 - 確かめたのは、本物の秘密が許可リストと承認を通って注入先のコマンドに届き、コマンドがトークンを出さずに使えたこと。Pushover の API が受け付け（request の ID）、スマホに `monban-local` から「門番を通った1本目」が届いた
 - 古い合言葉は、門番の手順のどの画面にも出していない。取り消した後の取り出しが通ったことで、門番が使っているのが新しいマシンアカウントの合言葉だとわかる（古い合言葉は `local-notify` に届かないので、5-2 が通った時点でも言えた）
-- 名札はどの要求も「名乗らず」。Claude Code から使う回は、まだやっていない
+- ここまでの名札はどの要求も「名乗らず」。Claude Code から使う回は下
+
+### Claude Code から使う回
+
+同じ日の 23:09〜23:10 に、Claude Code（この会話）から1回使った。
+
+- ユーザーキー：人がエージェントのいないウィンドウで `read -s` から `~/.config/monban-pushover-user` に書いた（`-rw-------`、30 バイト）。Claude Code はファイルの権限と大きさだけを見て、中身はコマンドの中で `$(cat …)` として読んだ。値は Claude Code の出力にもチャットにも出ていない
+- Claude Code が `PUSHOVER_USER="$(cat ~/.config/monban-pushover-user)" MONBAN_AGENT=claude monban run PUSHOVER_TOKEN -- /usr/local/libexec/monban-cmds/pushover-notify "Claude Code から門番を通った"` を裏で動かした。門番は「人の承認を待っています（リクエストの ID `3715ad457f8d`、2分で時間切れ）」を出して待った
+- 承認：人がエージェントのいないウィンドウで `monban approve` を打った。画面に、名札（申告）`"claude"`、秘密 `PUSHOVER_TOKEN`、コマンド `/usr/local/libexec/monban-cmds/pushover-notify`、引数 1 `"Claude Code から門番を通った"`、繋いできた pid 82768 が出た。経過 31 秒で承認した
+- Claude Code の側に `送った` と Pushover の request の ID が出て、exit 0。トークンは出なかった。スマホに `monban-local` から「Claude Code から門番を通った」が届いた
+- ログ：seq 40（承認の画面に出した）→ 41（承認された）→ 42（渡した。`agent` `"claude"`、pid 82768、`argc` 1、値は書かれていない）。approve の側の行（40・41）は名札が空。`monban verify-log` は「連鎖は合っている：42 行、12025 バイト」
+
+言えること・言えないこと：
+
+- 名札は申告で、Claude Code が `MONBAN_AGENT` を付けたから `claude` と出た。付けなければ「名乗らず」になり、別の名前も名乗れる。名札は記録と承認の判断の材料で、守りではない（守りは人の承認）
+- 承認の画面の pid とログの pid が同じなので、人が見て承認した要求と、値が渡った要求は同じもの
 
 ### 手順書を直したところ
 

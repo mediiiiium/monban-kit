@@ -38,7 +38,7 @@ monban（門番）= gatekeeper。自分用のパスワード管理の構成。�
   - 10段目：2026-11-11 に、本番の形（launchd のデーモン・`_monban`・`bws` の子）で、root の対照つきで確かめた。root でない本人の uid からは、合言葉は `ps eww` で見えず（取り出しの最中の `bws` の子を3回捕まえて3回とも）、合言葉のファイルも読めなかった。同じ瞬間に root からは見えた。見たのは `ps` の道とファイルの権限だけで、root には守れない（[docs/production-check.md](docs/production-check.md)）
 - 2026-11-12 に、最初の本物の秘密を入れた（[docs/first-real-secret.md](docs/first-real-secret.md)）。手元用に新しく作った Pushover のアプリのトークン（`PUSHOVER_TOKEN`）で、漏れても通知を送られるだけのもの。注入先は root の持ち物の場所に置いた専用のコマンド（[tools/pushover-notify](tools/pushover-notify)。トークンを出さない）。人のターミナルから承認つきで通り、トークンは画面に出なかった
   - 同時に合言葉を替えた：マシンアカウントを新しく作り（`local-notify` と `MONBAN_TEST` のプロジェクトを読むだけ）、古いマシンアカウントの合言葉は取り消した
-  - Claude Code から使う回は、まだ
+  - 同じ日に Claude Code からも使った：名札 `claude` が承認の画面とログに出て、承認つきで通った。スマホに届いた
 - v1 は高リスクの秘密を扱わない。ターミナルの承認は事故防止で、強い承認ではない（[docs/v1-plan.md](docs/v1-plan.md) の「これで防げないこと」）
 - 人の側（Bitwarden の個人金庫を普段使いで試す）は、まだ記録していない
 
