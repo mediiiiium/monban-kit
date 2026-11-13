@@ -10,15 +10,41 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
+	"strings"
 )
 
 // redactMark は、伏せた値の代わりに出す文字列。
 const redactMark = "[monban: 伏せた]"
 
 // minValue は、伏せられる値の短さの下限（バイト）。これより短い値は、正常な出力の中にも
-// ありふれて現れ、伏せると出力を静かに書き換えてしまうので、門番も run も渡さない・動かさない。
+// ありふれて現れ、伏せると出力を静かに書き換えてしまうので、門番も run も渡さない・動かさない（checkRedactable）。
 const minValue = 8
+
+// checkRedactable は、値を出力から伏せられるかを確かめる。伏せられない値は、門番も渡さず、run も動かさない。
+//   - minValue より短い値
+//   - 置き換えの文字列（redactMark）と重なる値。値が redactMark を含む・redactMark に含まれる、
+//     値の先頭が redactMark の末尾と一致する、値の末尾が redactMark の先頭と一致する、のどれか。
+//     重なると、伏せた結果と前後の出力がつながって、値そのものができてしまうことがある
+//     （値が "a"+redactMark+"b" で、出力が "a"+値+"b" なら、伏せた結果が値と同じになる）
+//
+// 出力に新しく現れた値は、どこかで redactMark と重なっているはずなので、この4つを断れば足りる。
+func checkRedactable(value string) error {
+	if len(value) < minValue {
+		return fmt.Errorf("値が短すぎて出力から伏せられない（%dバイト未満）", minValue)
+	}
+	if strings.Contains(value, redactMark) || strings.Contains(redactMark, value) {
+		return errors.New("値が伏せた印と重なるので出力から伏せられない")
+	}
+	for k := 1; k < len(redactMark) && k <= len(value); k++ {
+		if strings.HasPrefix(value, redactMark[len(redactMark)-k:]) || strings.HasSuffix(value, redactMark[:k]) {
+			return errors.New("値が伏せた印と重なるので出力から伏せられない")
+		}
+	}
+	return nil
+}
 
 // redactor は、書き込まれたバイト列から値を伏せて w に流す。値の照合は KMP で1バイトずつ進める。
 // 手元に残す分（値の先頭 j バイトと一致している末尾）は、値そのものなので、別に持たない。
@@ -54,7 +80,7 @@ func (r *redactor) Write(p []byte) (int, error) {
 	}
 	v := r.value
 	if len(v) == 0 {
-		// 空の値は伏せようがない（run は minValue より短い値で動かないので、ここには来ない）。
+		// 空の値は伏せようがない（run は checkRedactable を通らない値で動かないので、ここには来ない）。
 		return r.w.Write(p)
 	}
 	var out bytes.Buffer

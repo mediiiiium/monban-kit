@@ -22,6 +22,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -44,7 +46,7 @@ func agentName() string {
 }
 
 // resolveCommand は、コマンドを PATH から引いて絶対パスにする。門番は PATH を信じないので、run の側で決める。
-// 5段目では、ここで決めたパスをそのまま exec する（送ったものと違うものを動かさない）。
+// ここで決めたパスをそのまま子として動かす（送ったものと違うものを動かさない）。
 func resolveCommand(name string) (string, error) {
 	p, err := exec.LookPath(name)
 	if err != nil {
@@ -70,50 +72,125 @@ func runRun(args []string) error {
 		return fmt.Errorf("門番に繋げない: %w", err)
 	}
 	value, err := ask(c, request{Agent: agentName(), Secret: secret, Command: command})
-	// 値を受け取っても受け取らなくても、exec の前に閉じる。close-on-exec に頼らない。
+	// 値を受け取っても受け取らなくても、子を動かす前に閉じる。close-on-exec に頼らない。
 	c.Close()
 	if err != nil {
 		return err
 	}
-	// 門番も短い値は渡さないが、偽の門番や古い門番に繋いだときのために、run の側でも確かめる。
-	if len(value) < minValue {
-		return fmt.Errorf("値が短すぎて出力から伏せられないので、動かさない（%dバイト未満）", minValue)
+	// 門番も伏せられない値は渡さないが、偽の門番や古い門番に繋いだときのために、run の側でも確かめる。
+	if err := checkRedactable(value); err != nil {
+		return fmt.Errorf("%v。動かさない", err)
 	}
 	env := injectEnv(os.Environ(), secret, value)
 
-	// 合図は、子が動く前から受けておく（取りこぼさない）。受けた合図は子に渡す。
-	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, forwardSignals...)
-	res, err := runChild(path, command, env, value, os.Stdin, os.Stdout, os.Stderr, sigs)
-	signal.Stop(sigs)
+	// 合図は、子が動く前から受けておく（取りこぼさない）。
+	sigs, release := catchSignals()
+	res, err := runChild(path, command, env, value, os.Stdin, os.Stdout, os.Stderr, sigs, release)
+	release()
 	if err != nil {
 		return fmt.Errorf("コマンドを実行できない（%s）: %v", path, err)
 	}
 	if res.redacted > 0 {
 		fmt.Fprintf(os.Stderr, "monban run: 出力から秘密の値を %d か所伏せた\n", res.redacted)
 	}
+	if res.copyErr {
+		fmt.Fprintln(os.Stderr, "monban run: 子の出力を最後まで流せなかった")
+	}
 	exitLike(res)
 	return nil
 }
 
-// forwardSignals は、run が受けて子に渡す合図。
-var forwardSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP}
+// forwardSignals は、run が受けて子に渡す合図。pid を名指しして送られることが多いもの。
+// swallowSignals は、run が受けて捨てる合図。端末の Ctrl-C・Ctrl-\ は、同じプロセスグループの子にも
+// 端末から直接届くので、渡すと2回になる（2回目で後始末を飛ばすコマンドがある）。
+// そのかわり、run の pid だけに送られた SIGINT・SIGQUIT は子に届かない。
+var (
+	forwardSignals = []os.Signal{syscall.SIGTERM, syscall.SIGHUP}
+	swallowSignals = []os.Signal{syscall.SIGINT, syscall.SIGQUIT}
+)
+
+// catchSignals は、合図を受け始め、渡す合図の通り道と、受けるのをやめる関数を返す。
+// 起動時に無視（nohup や、非対話のシェルの &）されていた合図は受けない。受けると Go が扱いを付け直し、
+// 子が「無視」を引き継がなくなる（exec の形では引き継いでいた）。
+// やめた後は、合図の扱いが既定に戻る（SIGTERM などで run が死ねる）。
+func catchSignals() (<-chan os.Signal, func()) {
+	fwd, swallow := make(chan os.Signal, 4), make(chan os.Signal, 4)
+	for _, s := range forwardSignals {
+		if !signal.Ignored(s) {
+			signal.Notify(fwd, s)
+		}
+	}
+	for _, s := range swallowSignals {
+		if !signal.Ignored(s) {
+			signal.Notify(swallow, s)
+		}
+	}
+	var once sync.Once
+	return fwd, func() {
+		once.Do(func() {
+			signal.Stop(fwd)
+			signal.Stop(swallow)
+		})
+	}
+}
 
 // childResult は、子の終わり方と、伏せた数。
 type childResult struct {
 	code     int            // 終了コード（合図で死んだときは -1）
 	signal   syscall.Signal // 子を殺した合図（合図で死んでいなければ 0）
 	redacted int
+	copyErr  bool // 子の出力を最後まで流せなかった（下流への書き込みの失敗。孫が握っていて待つのをやめたときは含めない）
 }
 
+// grandchildWait は、子が終わった後、孫が出力を握っていても待つ時間。
+const grandchildWait = 2 * time.Second
+
 // runChild は、path を子として動かし、stdout・stderr から値を伏せて流し、子の終わり方を返す。
-// sigs に届いた合図は、子に渡す。子が孫を残して出力を握っていても、子が終わってから2秒で待つのをやめる。
-func runChild(path string, argv, env []string, value string, stdin io.Reader, stdout, stderr io.Writer, sigs <-chan os.Signal) (childResult, error) {
-	outR, errR := newRedactor(stdout, value), newRedactor(stderr, value)
-	cmd := &exec.Cmd{Path: path, Args: argv, Env: env, Stdin: stdin, Stdout: outR, Stderr: errR, WaitDelay: 2 * time.Second}
-	if err := cmd.Start(); err != nil {
+// sigs に届いた合図は、子に渡す。子が終わったら release を呼ぶ（以後の合図は run 自身に効く。
+// 下流への書き込みが詰まっても、run を止められるように）。
+// パイプは自分で持つ。exec.Cmd に任せると、Wait が下流への書き込みの終わりまで待つため。
+// 子が孫を残して出力を握っていても、子が終わってから grandchildWait で読むのをやめる。
+func runChild(path string, argv, env []string, value string, stdin io.Reader, stdout, stderr io.Writer, sigs <-chan os.Signal, release func()) (childResult, error) {
+	outRed, errRed := newRedactor(stdout, value), newRedactor(stderr, value)
+	outR, outW, err := os.Pipe()
+	if err != nil {
 		return childResult{}, err
 	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		outR.Close()
+		outW.Close()
+		return childResult{}, err
+	}
+	cmd := &exec.Cmd{Path: path, Args: argv, Env: env, Stdin: stdin, Stdout: outW, Stderr: errW}
+	err = cmd.Start()
+	// 書く側は子だけが持つ。親が持ったままだと、子と孫が終わっても読み終わらない。
+	outW.Close()
+	errW.Close()
+	if err != nil {
+		outR.Close()
+		errR.Close()
+		return childResult{}, err
+	}
+	var wg sync.WaitGroup
+	var copyErr atomic.Bool
+	pump := func(r *os.File, red *redactor) {
+		defer wg.Done()
+		_, err := io.Copy(red, r)
+		if err == nil {
+			err = red.Flush()
+		} else {
+			red.Flush() // 手元に残した分は値の先頭の一部だけで、値の全体ではない
+		}
+		if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
+			copyErr.Store(true)
+		}
+		r.Close() // 子がまだ書いていれば、SIGPIPE か EPIPE になる
+	}
+	wg.Add(2)
+	go pump(outR, outRed)
+	go pump(errR, errRed)
+
 	done := make(chan struct{})
 	go func() {
 		for {
@@ -125,15 +202,21 @@ func runChild(path string, argv, env []string, value string, stdin io.Reader, st
 			}
 		}
 	}()
-	err := cmd.Wait()
+	werr := cmd.Wait()
 	close(done)
-	outR.Flush()
-	errR.Flush()
-	res := childResult{code: -1, redacted: outR.n + errR.n}
-	if cmd.ProcessState == nil {
-		return res, err
+	if release != nil {
+		release()
 	}
-	// 終了コードが0でない・孫が出力を握っていた（ErrWaitDelay）は、子の終わり方として返す。エラーではない。
+	deadline := time.Now().Add(grandchildWait)
+	outR.SetReadDeadline(deadline)
+	errR.SetReadDeadline(deadline)
+	wg.Wait()
+
+	res := childResult{code: -1, redacted: outRed.n + errRed.n, copyErr: copyErr.Load()}
+	if cmd.ProcessState == nil {
+		return res, werr
+	}
+	// 終了コードが0でないのは、子の終わり方として返す。エラーではない。
 	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 		res.signal = ws.Signal()
 	} else {
