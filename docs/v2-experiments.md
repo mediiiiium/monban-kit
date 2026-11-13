@@ -68,8 +68,34 @@ scratchpad に最小の macOS アプリのプロジェクトを手で書いた�
 - 気になる点：Personal Team の provisioning profile には期限がある（無料の Apple ID では短いと言われる）。期限が切れたときに、鍵が読めなくなるのか、ビルドし直せば戻るのかは、まだ確かめていない
 - Debug ビルドなので `get-task-allow = true`（デバッガが付けられる）。本番の形では外す必要がある
 
+### Release ビルド・LaunchAgent・作り直し（2026-11-14、エージェントが行った）
+
+プロジェクトに Release の設定を足した。中身は Debug と同じで、`CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO` だけを加えた（Xcode が `get-task-allow` を足さないようにするため）。LaunchAgent は試験用のラベル（`io.github.mediiiiium.monban.exp0test`）で `launchctl bootstrap gui/<uid>` に入れ、`RunAtLoad` で1回だけ動かし、終わったら `bootout` した。sudo は使っていない。
+
+| 試したこと | 結果 |
+|---|---|
+| Release ビルドの entitlements | `application-identifier`、`team-identifier`、`keychain-access-groups` の3つだけ。`get-task-allow` はない。`embedded.provisionprofile` は入っている |
+| Release ビルドで作って残す → 別プロセスで探す | 作れた（65 バイト、`04`）、見つかった（`0`）。Debug ビルドからも見えた |
+| LaunchAgent から探す（ターミナルで作った鍵） | 見つかった（`0`、終了コード 0） |
+| LaunchAgent で消して作り直し、取り出す | できた。アクセスグループもトークンも同じ |
+| その鍵をターミナルから探す | 見つかった |
+| ソースを1行変えてビルドし直し、探す | 見つかった。profile は同じもの（UUID が同じ）が使われた |
+
+provisioning profile の期限：
+
+- 作られたのは 2026-11-13、期限は 2026-11-20（7日）。このマシン1台だけに結び付いている
+- 期限が切れた後のことはまだ確かめていない。期限が切れたら、次の2つを試す
+  1. 期限前にビルドした .app（`~/monban-exp0/Exp0-profile1120.app`）は起動できるか。起動できるなら、鍵は見えるか
+  2. ビルドし直して新しい profile が入った .app から、期限前に作った鍵は見えるか
+- そのために、試験用の鍵（`monban exp0 test key`）は消さずに残してある。プロジェクトの写しも `~/monban-exp0/` に置いた（scratchpad は消えることがあるため）。期限の確かめが終わったら、鍵もこのフォルダも消す
+
+読み：
+
+- Release ビルドでも、LaunchAgent からでも、鍵は残せて使える。門番の本番の形（LaunchAgent で常駐）で困ることは、今のところ見つかっていない
+- 鍵はバイナリのハッシュではなく、アクセスグループに結び付いている。そのため、作り直しても鍵は見える
+- 残る心配は期限の1つだけ。7日ごとにビルドし直す必要があるなら、手順に入れるか、有料の Developer Program を考えるかを、そのときに決める
+
 ### 残り
 
-- LaunchAgent で動かす
-- profile の期限とビルドし直しの影響
-- `get-task-allow` を外した形（Release ビルド）
+- profile の期限が切れた後（2026-11-21 以降）に、上の2つを試す
+- 実験0が片付いたら、実験1（Touch ID で署名させる）へ
