@@ -1,10 +1,13 @@
 package main
 
-// run：門番に繋いで「どの秘密を・どのコマンドに」を送り、値を受け取って、そのコマンドを exec する（5段目：注入）。
+// run：門番に繋いで「どの秘密を・どのコマンドに」を送り、値を受け取って、そのコマンドを動かす（5段目：注入）。
+// v1.5 からは exec せず、親として残ってコマンドを子として動かし、子の stdout・stderr から値を伏せて流す（redact.go）。
 // 守ること：
 // - 値は引数にもファイルにも置かず、環境変数（秘密の名前）にだけ入れる。エラーにも出さない
-// - 受け取ったら、門番へのソケットを閉じてからすぐ exec する（注入先に接続を引き継がない）
-// - 門番に送ったコマンドの絶対パスを、そのまま exec する（送ったものと違うものを動かさない）
+// - 受け取ったら、門番へのソケットを閉じてから子を動かす（子に接続を引き継がない）
+// - 門番に送ったコマンドの絶対パスを、そのまま動かす（送ったものと違うものを動かさない）
+// - 子の終わり方をそのまま返す。終了コードはそのまま。子が合図で死んだら、run も同じ合図で死ぬ（exec の形と同じに見える）
+// - 値は子が終わるまで run のメモリに残る（exec の形では、exec の瞬間に消えていた）
 
 import (
 	"bufio"
@@ -16,6 +19,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -71,10 +75,86 @@ func runRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 門番も短い値は渡さないが、偽の門番や古い門番に繋いだときのために、run の側でも確かめる。
+	if len(value) < minValue {
+		return fmt.Errorf("値が短すぎて出力から伏せられないので、動かさない（%dバイト未満）", minValue)
+	}
 	env := injectEnv(os.Environ(), secret, value)
-	// exec が成功すれば戻らない。run のメモリ（値を含む）は、ここで新しいコマンドに置き換わる。
-	err = syscall.Exec(path, command, env)
-	return fmt.Errorf("コマンドを実行できない（%s）: %v", path, err)
+
+	// 合図は、子が動く前から受けておく（取りこぼさない）。受けた合図は子に渡す。
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, forwardSignals...)
+	res, err := runChild(path, command, env, value, os.Stdin, os.Stdout, os.Stderr, sigs)
+	signal.Stop(sigs)
+	if err != nil {
+		return fmt.Errorf("コマンドを実行できない（%s）: %v", path, err)
+	}
+	if res.redacted > 0 {
+		fmt.Fprintf(os.Stderr, "monban run: 出力から秘密の値を %d か所伏せた\n", res.redacted)
+	}
+	exitLike(res)
+	return nil
+}
+
+// forwardSignals は、run が受けて子に渡す合図。
+var forwardSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP}
+
+// childResult は、子の終わり方と、伏せた数。
+type childResult struct {
+	code     int            // 終了コード（合図で死んだときは -1）
+	signal   syscall.Signal // 子を殺した合図（合図で死んでいなければ 0）
+	redacted int
+}
+
+// runChild は、path を子として動かし、stdout・stderr から値を伏せて流し、子の終わり方を返す。
+// sigs に届いた合図は、子に渡す。子が孫を残して出力を握っていても、子が終わってから2秒で待つのをやめる。
+func runChild(path string, argv, env []string, value string, stdin io.Reader, stdout, stderr io.Writer, sigs <-chan os.Signal) (childResult, error) {
+	outR, errR := newRedactor(stdout, value), newRedactor(stderr, value)
+	cmd := &exec.Cmd{Path: path, Args: argv, Env: env, Stdin: stdin, Stdout: outR, Stderr: errR, WaitDelay: 2 * time.Second}
+	if err := cmd.Start(); err != nil {
+		return childResult{}, err
+	}
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case s := <-sigs:
+				cmd.Process.Signal(s)
+			case <-done:
+				return
+			}
+		}
+	}()
+	err := cmd.Wait()
+	close(done)
+	outR.Flush()
+	errR.Flush()
+	res := childResult{code: -1, redacted: outR.n + errR.n}
+	if cmd.ProcessState == nil {
+		return res, err
+	}
+	// 終了コードが0でない・孫が出力を握っていた（ErrWaitDelay）は、子の終わり方として返す。エラーではない。
+	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		res.signal = ws.Signal()
+	} else {
+		res.code = cmd.ProcessState.ExitCode()
+	}
+	return res, nil
+}
+
+// exitLike は、子と同じ終わり方で run を終える。
+// 子が合図で死んだら、run も同じ合図で死ぬ。Go が既定で「その合図で死ぬ」扱いをするのは
+// SIGINT・SIGTERM・SIGHUP と、受けられない SIGKILL だけなので、それ以外の合図は 128＋番号で終える。
+func exitLike(res childResult) {
+	switch res.signal {
+	case 0:
+		os.Exit(res.code)
+	case syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGKILL:
+		signal.Reset(res.signal)
+		syscall.Kill(os.Getpid(), res.signal)
+		time.Sleep(time.Second) // 合図が届くまで
+	}
+	os.Exit(128 + int(res.signal))
 }
 
 // ask は、要求を1行送り、返事を読んで値を返す。エラーには値を入れない。

@@ -167,3 +167,43 @@ func TestKillDuringBws(t *testing.T) {
 		t.Fatalf("ログ: %s", b)
 	}
 }
+
+// 門番は、短すぎる値（minValue 未満）を渡さない。長さが足りれば渡す。値はログに出ない。
+func TestDaemonRefusesShortValue(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		ok    bool
+	}{{"short", false}, {"just-8by", true}} {
+		srv, sock, logPath := newTestServer(t, uint32(os.Getuid()))
+		dir := filepath.Dir(logPath)
+		fake := filepath.Join(dir, "bws")
+		os.WriteFile(filepath.Join(dir, "out.json"), []byte(`{"key":"MONBAN_TEST","value":"`+c.value+`"}`), 0o600)
+		os.WriteFile(fake, []byte("#!/bin/sh\ncat "+filepath.Join(dir, "out.json")+"\n"), 0o700)
+		srv.bws = &bwsClient{path: fake, token: "fake", home: dir}
+		a, err := parseAllowlist([]byte(`{"secrets":[{"name":"MONBAN_TEST","id":"0a1b2c3d-0000-0000-0000-000000000000",` +
+			`"allow":[{"command":"/usr/bin/printenv","agents":["*"],"approval":"none"}]}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.allow = a
+		conn, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Write([]byte(`{"agent":"a","secret":"MONBAN_TEST","command":["/usr/bin/printenv","MONBAN_TEST"]}` + "\n"))
+		line, _ := bufio.NewReader(conn).ReadString('\n')
+		conn.Close()
+		if got := strings.HasPrefix(line, "OK "); got != c.ok {
+			t.Fatalf("値 %d バイト: 返事 %.10q", len(c.value), line)
+		}
+		srv.halt("試し", false)
+		srv.conns.Wait()
+		b, _ := os.ReadFile(logPath)
+		if bytes.Contains(b, []byte(c.value)) {
+			t.Fatalf("ログに値が出た")
+		}
+		if !c.ok && !bytes.Contains(b, []byte("値が短すぎて出力から伏せられない")) {
+			t.Fatalf("ログに理由がない: %s", b)
+		}
+	}
+}
