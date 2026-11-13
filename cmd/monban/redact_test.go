@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -97,10 +98,12 @@ func TestCheckRedactable(t *testing.T) {
 		{"1234567", false}, {"12345678", true},
 		{"秘密", false}, {"秘密です", true}, // 6バイトと12バイト
 		{"a" + redactMark + "b", false}, // 印を含む
-		{"monban: 伏", false},            // 印に含まれる
-		{"]" + "abcdefgh", false},       // 先頭が印の末尾と重なる
-		{"abcdefgh" + "[mon", false},    // 末尾が印の先頭と重なる
-		{"abcdefgh[x", true},            // 印の先頭と同じ文字があっても、重ならなければよい
+		{"monban: 伏せ", false},           // 印に含まれる
+		{"】" + "abcdefgh", false},       // 先頭が印の末尾と重なる
+		{"abcdefgh" + "【mon", false},    // 末尾が印の先頭と重なる
+		{"abcdefgh" + "【", false},       // 末尾が run の知らせの行の先頭と重なる
+		{"]abcdefgh[", true},            // ASCII の括弧は重ならない
+		{"abcdefgh【x", true},            // 印の先頭と同じ文字があっても、端で重ならなければよい
 		{"dummy-value-for-test", true},
 	} {
 		if err := checkRedactable(c.value); (err == nil) != c.ok {
@@ -168,7 +171,7 @@ func TestRunChildRedacts(t *testing.T) {
 	if out != redactMark+"\n" || errOut != "err:"+redactMark {
 		t.Fatalf("出力: %q %q", out, errOut)
 	}
-	if res.code != 3 || res.signal != 0 || res.redacted != 2 || res.copyErr {
+	if res.code != 3 || res.signal != 0 || res.redacted != 2 || res.copyErr || res.idleStop {
 		t.Fatalf("終わり方: %+v", res)
 	}
 }
@@ -189,7 +192,7 @@ func TestRunChildGrandchildHoldsPipe(t *testing.T) {
 	res, err := runChild("/bin/sh", []string{"/bin/sh", "-c", `(sleep 4; echo late) & echo now`}, os.Environ(), testValue,
 		nil, &stdout, &stderr, nil, func() { released = time.Since(t0) })
 	took := time.Since(t0)
-	if err != nil || res.code != 0 || stdout.String() != "now\n" || res.copyErr {
+	if err != nil || res.code != 0 || stdout.String() != "now\n" || res.copyErr || !res.idleStop {
 		t.Fatalf("終わり方: %+v %v 出力 %q", res, err, stdout.String())
 	}
 	if took < grandchildWait-500*time.Millisecond || took > grandchildWait+time.Second {
@@ -197,6 +200,38 @@ func TestRunChildGrandchildHoldsPipe(t *testing.T) {
 	}
 	if released > time.Second {
 		t.Fatalf("release が遅い: %v（孫を待ってから呼んだ）", released)
+	}
+}
+
+// slowWriter は、最初の書き込みだけ grandchildWait より長くかかる下流。
+type slowWriter struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	calls int
+}
+
+func (w *slowWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.calls++; w.calls == 1 {
+		time.Sleep(grandchildWait + 500*time.Millisecond)
+	}
+	return w.buf.Write(p)
+}
+
+// 子が終わった時点でパイプに残っている子の出力を、下流が遅くても捨てない。
+// 子は "a" を書き、少し後に "b" を書いて終わる。run が "a" を下流に流している間に子が終わり、"b" はパイプに残る。
+// 締め切りが「子が終わってから2秒」に固定だと、"a" を流し終えた時点で過ぎていて、"b" を読まずにやめてしまう。
+func TestRunChildSlowDownstream(t *testing.T) {
+	w := &slowWriter{}
+	var stderr bytes.Buffer
+	res, err := runChild("/bin/sh", []string{"/bin/sh", "-c", `printf a; sleep 0.2; printf b`}, os.Environ(), testValue,
+		nil, w, &stderr, nil, nil)
+	if err != nil || res.code != 0 || res.copyErr || res.idleStop {
+		t.Fatalf("終わり方: %+v %v", res, err)
+	}
+	if got := w.buf.String(); got != "ab" {
+		t.Fatalf("受け取ったのは %q", got)
 	}
 }
 

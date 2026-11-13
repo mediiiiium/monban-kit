@@ -91,10 +91,13 @@ func runRun(args []string) error {
 		return fmt.Errorf("コマンドを実行できない（%s）: %v", path, err)
 	}
 	if res.redacted > 0 {
-		fmt.Fprintf(os.Stderr, "monban run: 出力から秘密の値を %d か所伏せた\n", res.redacted)
+		fmt.Fprintf(os.Stderr, "%s出力から秘密の値を %d か所伏せた\n", runNoticePrefix, res.redacted)
 	}
 	if res.copyErr {
-		fmt.Fprintln(os.Stderr, "monban run: 子の出力を最後まで流せなかった")
+		fmt.Fprintln(os.Stderr, runNoticePrefix+"子の出力を最後まで流せなかった")
+	}
+	if res.idleStop {
+		fmt.Fprintf(os.Stderr, "%s子が終わった後、%d秒出力が来なかったので読むのをやめた（孫が出力を握っていた）\n", runNoticePrefix, int(grandchildWait/time.Second))
 	}
 	exitLike(res)
 	return nil
@@ -139,18 +142,35 @@ type childResult struct {
 	code     int            // 終了コード（合図で死んだときは -1）
 	signal   syscall.Signal // 子を殺した合図（合図で死んでいなければ 0）
 	redacted int
-	copyErr  bool // 子の出力を最後まで流せなかった（下流への書き込みの失敗。孫が握っていて待つのをやめたときは含めない）
+	copyErr  bool // 子の出力を最後まで流せなかった（下流への書き込みの失敗）
+	idleStop bool // 子が終わった後、grandchildWait のあいだ出力が来なかったので読むのをやめた
 }
 
-// grandchildWait は、子が終わった後、孫が出力を握っていても待つ時間。
+// grandchildWait は、子が終わった後、出力が来ないまま待つ時間。読めている間は待ち続ける
+// （子が書いてパイプに残った分を、下流が遅くても捨てない）。来ないまま過ぎたら、孫が握っているとみてやめる。
 const grandchildWait = 2 * time.Second
+
+// idleReader は、子が終わった後（exited）は、読む前ごとに締め切りを grandchildWait 先に付け直す。
+type idleReader struct {
+	f      *os.File
+	exited *atomic.Bool
+}
+
+func (r idleReader) Read(p []byte) (int, error) {
+	if r.exited.Load() {
+		r.f.SetReadDeadline(time.Now().Add(grandchildWait))
+	}
+	return r.f.Read(p)
+}
 
 // runChild は、path を子として動かし、stdout・stderr から値を伏せて流し、子の終わり方を返す。
 // sigs に届いた合図は、子に渡す。子が終わったら release を呼ぶ（以後の合図は run 自身に効く。
 // 下流への書き込みが詰まっても、run を止められるように）。
 // パイプは自分で持つ。exec.Cmd に任せると、Wait が下流への書き込みの終わりまで待つため。
-// 子が孫を残して出力を握っていても、子が終わってから grandchildWait で読むのをやめる。
-func runChild(path string, argv, env []string, value string, stdin io.Reader, stdout, stderr io.Writer, sigs <-chan os.Signal, release func()) (childResult, error) {
+// 子が終わった後は、grandchildWait のあいだ出力が来なければ読むのをやめる（孫が握っているとき）。
+// stdin は *os.File か nil（/dev/null）に限る。ほかの Reader だと exec.Cmd がコピーの goroutine を作り、
+// Wait がその終わりを待つので、子が終わっても戻らないことがある。
+func runChild(path string, argv, env []string, value string, stdin *os.File, stdout, stderr io.Writer, sigs <-chan os.Signal, release func()) (childResult, error) {
 	outRed, errRed := newRedactor(stdout, value), newRedactor(stderr, value)
 	outR, outW, err := os.Pipe()
 	if err != nil {
@@ -162,7 +182,11 @@ func runChild(path string, argv, env []string, value string, stdin io.Reader, st
 		outW.Close()
 		return childResult{}, err
 	}
-	cmd := &exec.Cmd{Path: path, Args: argv, Env: env, Stdin: stdin, Stdout: outW, Stderr: errW}
+	cmd := &exec.Cmd{Path: path, Args: argv, Env: env, Stdout: outW, Stderr: errW}
+	if stdin != nil {
+		// nil の *os.File を io.Reader に入れると nil でなくなるので、nil のときは入れない（/dev/null になる）。
+		cmd.Stdin = stdin
+	}
 	err = cmd.Start()
 	// 書く側は子だけが持つ。親が持ったままだと、子と孫が終わっても読み終わらない。
 	outW.Close()
@@ -173,19 +197,22 @@ func runChild(path string, argv, env []string, value string, stdin io.Reader, st
 		return childResult{}, err
 	}
 	var wg sync.WaitGroup
-	var copyErr atomic.Bool
+	var copyErr, idleStop, exited atomic.Bool
 	pump := func(r *os.File, red *redactor) {
 		defer wg.Done()
-		_, err := io.Copy(red, r)
-		if err == nil {
-			err = red.Flush()
-		} else {
-			red.Flush() // 手元に残した分は値の先頭の一部だけで、値の全体ではない
+		_, err := io.Copy(red, idleReader{r, &exited})
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			idleStop.Store(true)
+			err = nil
 		}
-		if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
+		// 手元に残した分は値の先頭の一部だけで、値の全体ではないので、止まったときも流す。
+		if ferr := red.Flush(); err == nil {
+			err = ferr
+		}
+		if err != nil {
 			copyErr.Store(true)
 		}
-		r.Close() // 子がまだ書いていれば、SIGPIPE か EPIPE になる
+		r.Close() // 子か孫がまだ書いていれば、SIGPIPE か EPIPE になる
 	}
 	wg.Add(2)
 	go pump(outR, outRed)
@@ -207,12 +234,14 @@ func runChild(path string, argv, env []string, value string, stdin io.Reader, st
 	if release != nil {
 		release()
 	}
+	// 子が終わった後は、読む前ごとに締め切りを付け直す。いま読みかけの Read にも締め切りを付ける。
+	exited.Store(true)
 	deadline := time.Now().Add(grandchildWait)
 	outR.SetReadDeadline(deadline)
 	errR.SetReadDeadline(deadline)
 	wg.Wait()
 
-	res := childResult{code: -1, redacted: outRed.n + errRed.n, copyErr: copyErr.Load()}
+	res := childResult{code: -1, redacted: outRed.n + errRed.n, copyErr: copyErr.Load(), idleStop: idleStop.Load()}
 	if cmd.ProcessState == nil {
 		return res, werr
 	}

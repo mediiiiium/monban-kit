@@ -16,8 +16,15 @@ import (
 	"strings"
 )
 
-// redactMark は、伏せた値の代わりに出す文字列。
-const redactMark = "[monban: 伏せた]"
+// redactMark は、伏せた値の代わりに出す文字列。先頭と末尾を全角の括弧にする。値は JSON の文字列から
+// 来るので正しい UTF-8 で、正しい UTF-8 は続きのバイト（0x80〜0xBF）で始まれず、先頭のバイトで終われない。
+// だから印との重なりは文字の単位になり、ASCII だけの値は印と重ならない（checkRedactable で断られない）。
+const redactMark = "【monban: 伏せた】"
+
+// runNoticePrefix は、子が終わった後に run が stderr に足す行の書き出し。子の stderr の最後に
+// 手元に残した分（値の先頭の一部）が流れた直後に続くので、この書き出しとつながって値ができないよう、
+// checkRedactable で末尾との重なりも見る。
+const runNoticePrefix = "【monban run】"
 
 // minValue は、伏せられる値の短さの下限（バイト）。これより短い値は、正常な出力の中にも
 // ありふれて現れ、伏せると出力を静かに書き換えてしまうので、門番も run も渡さない・動かさない（checkRedactable）。
@@ -29,18 +36,26 @@ const minValue = 8
 //     値の先頭が redactMark の末尾と一致する、値の末尾が redactMark の先頭と一致する、のどれか。
 //     重なると、伏せた結果と前後の出力がつながって、値そのものができてしまうことがある
 //     （値が "a"+redactMark+"b" で、出力が "a"+値+"b" なら、伏せた結果が値と同じになる）
+//   - 値の末尾が runNoticePrefix の先頭と一致する値（run の知らせの行とつながる）
 //
-// 出力に新しく現れた値は、どこかで redactMark と重なっているはずなので、この4つを断れば足りる。
+// 出力に新しく現れた値は、どこかで redactMark と重なっているはずなので（左から重ならない置き換えなので、
+// 置き換えなかった区間に値がまるごと入ることはない）、この4つを断れば足りる。
 func checkRedactable(value string) error {
 	if len(value) < minValue {
 		return fmt.Errorf("値が短すぎて出力から伏せられない（%dバイト未満）", minValue)
 	}
+	overlap := errors.New("値が伏せた印と重なるので出力から伏せられない")
 	if strings.Contains(value, redactMark) || strings.Contains(redactMark, value) {
-		return errors.New("値が伏せた印と重なるので出力から伏せられない")
+		return overlap
 	}
 	for k := 1; k < len(redactMark) && k <= len(value); k++ {
 		if strings.HasPrefix(value, redactMark[len(redactMark)-k:]) || strings.HasSuffix(value, redactMark[:k]) {
-			return errors.New("値が伏せた印と重なるので出力から伏せられない")
+			return overlap
+		}
+	}
+	for k := 1; k <= len(runNoticePrefix) && k <= len(value); k++ {
+		if strings.HasSuffix(value, runNoticePrefix[:k]) {
+			return overlap
 		}
 	}
 	return nil
