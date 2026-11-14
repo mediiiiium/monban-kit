@@ -257,8 +257,38 @@ Go 側は `ecdsa.ParseUncompressedPublicKey(elliptic.P256(), 公開鍵)` で読�
 - 指が要るかどうかは、署名の形式に影響しない
 - 問いの中身をどうバイト列にするか（領域名・nonce・リクエストの ID などの並べ方）は、まだ決めていない。ヘルパーを作るときに決める
 
+## 実験5：同じ uid から、署名済みのヘルパーに入り込めるか（2026-11-14、試すのはエージェント、人の手は要らなかった）
+
+ヘルパーの代わりに、実験3d で `monban-build` がビルドした `Exp0.app`（Release、`monban-build` の身元で署名、Hardened Runtime つき、`get-task-allow` なし）を使った。エージェントの uid から `--find`（鍵を探すだけ、指は要らない）で動かした。比べるために、同じアプリを scratchpad に写して ad-hoc で署名し直し、Hardened Runtime も entitlements も外したもの（守りなしの写し）にも同じことをした。差し込むライブラリは、読み込まれると印のファイルを書くだけのもの。試験が終わったら写しは消した。
+
+| 試したこと | 本物（`monban-build` の署名・Hardened Runtime） | 守りなしの写し |
+|---|---|---|
+| `DYLD_INSERT_LIBRARIES` でライブラリを差し込む | 読み込まれない（印なし）。何事もなく動き、鍵も見つかる（`探す: 0`） | 読み込まれた（印あり）。鍵は見つからない（`-25300`、アクセスグループを名乗れない） |
+| `DYLD_PRINT_LIBRARIES`（dyld の環境変数そのものが効くか） | 何も出ない（環境変数が捨てられる） | 読み込んだライブラリが出る |
+| 止めた状態で起動して、`lldb -p` で接続 | 断られた（`Not allowed to attach to process`） | 繋がった。認証の画面も出なかった |
+| `lldb` から起動する | 断られた（同じエラー） | 試していない |
+| 元の entitlements に `get-task-allow` を足して、ad-hoc で署名し直す | 起動で殺された（終了コード 137。実験3c と同じ） | ― |
+
+読み：
+
+- 同じ uid からは、守りのないプロセスには認証の画面もなしにデバッガで繋がる（開発者モードは切ってある）。止めているのは Hardened Runtime と、`get-task-allow` がないこと
+- ライブラリの差し込みは、Hardened Runtime の下では dyld の環境変数ごと捨てられる
+- 守りを外すには署名し直すしかなく、署名し直すとアクセスグループを名乗れず、鍵に届かない（名乗る entitlements を付けると起動で殺される）。入り込める写しは鍵を使えない
+- 断った理由は Console のログからは拾えなかった（`log show` で debugserver の記録が出なかった）
+
+ヘルパーの作りに足すこと（design.md に書いた）：
+
+- Release でビルドし、Hardened Runtime を付ける（`ENABLE_HARDENED_RUNTIME = YES`）。`get-task-allow` を付けない（`CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO`）
+- `com.apple.security.cs.` で始まる例外の entitlements（`allow-dyld-environment-variables`、`disable-library-validation`、`allow-unsigned-executable-memory` など）を付けない
+- 入れる前に `codesign -dv --entitlements -` で、flags に `runtime` があり、entitlements が3つだけ（`application-identifier`、`team-identifier`、`keychain-access-groups`）なのを人が確かめる
+
+確かめきれなかったこと：
+
+- 動いているヘルパーの中を読むだけの接続（`vmmap` など）。`--find` はすぐ終わり、止めた状態では dyld の前で中が読めなかった。ヘルパーは秘密の値も秘密鍵も持たない（鍵は Secure Enclave の中）ので、読めても問いと署名が見えるだけ。署名は1回限りの問いに結び付いている
+- root からの接続（v1 と同じく、root からは守らない）
+
 ## 残り
 
 - profile の期限が切れた後（2026-11-21 以降）に、実験0の2つを試す。1つ目（古いアプリ `Exp0-profile1120.app` が鍵を使えるか）はエージェントの側でそのまま試す。2つ目（作り直し）は `monban-build` でビルドし直して試す。エージェントの側に身元は戻さない
 - 実験2（`biometryCurrentSet` の鍵）は、実験0・1で同じフラグの鍵を作って署名できたので、ほぼ済み。署名の種類ごとの記録は、Personal Team で作れて ad-hoc で作れない（`-34018`）まで取れている
-- 実験3c・3d を受けて、第2層ありの形（ビルドは `monban-build`、作り直しの前に人が差分を読む）で進めると決め、design.md の「門番の v2」に書いた（2026-11-14）。実験4は済んだ（2026-11-14）。次は実験5
+- 実験3c・3d を受けて、第2層ありの形（ビルドは `monban-build`、作り直しの前に人が差分を読む）で進めると決め、design.md の「門番の v2」に書いた（2026-11-14）。実験4・5は済んだ（2026-11-14）。次は実験6
