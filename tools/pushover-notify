@@ -35,7 +35,8 @@ def main():
         payload["title"] = sys.argv[2]
     req = urllib.request.Request(API, data=urllib.parse.urlencode(payload).encode())
     try:
-        with urllib.request.urlopen(req, timeout=30) as res:
+        # 送り先は定数 API（https 固定）で、外から変えられない
+        with urllib.request.urlopen(req, timeout=30) as res:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             body = json.loads(res.read().decode())
     except urllib.error.HTTPError as e:
         # 本文には理由（トークンが不正、など）だけが入る。キーそのものは返ってこない

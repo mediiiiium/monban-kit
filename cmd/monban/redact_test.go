@@ -5,7 +5,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"math/rand"
+	// テストを再現できるよう、シードを固定した擬似乱数を使う。暗号には使わない
+	"math/rand" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"net"
 	"os"
 	"os/exec"
@@ -331,7 +332,8 @@ func helperMode(t *testing.T) bool {
 
 func helper(t *testing.T, mode string, wrap ...string) (*exec.Cmd, string) {
 	args := append(wrap, os.Args[0], "-test.run=^TestSignals$")
-	cmd := exec.Command(args[0], args[1:]...)
+	// テストの実行ファイル自身を、子として起動し直す（シェルは通さない）
+	cmd := exec.Command(args[0], args[1:]...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd.Env = append(os.Environ(), "MONBAN_HELPER="+mode)
 	out, _ := cmd.Output()
 	return cmd, string(out)

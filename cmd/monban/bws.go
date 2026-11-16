@@ -112,7 +112,8 @@ func (b *bwsClient) get(ctx context.Context, name, id string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, b.path, "secret", "get", id, "--output", "json", "--color", "no")
+	// 動かすのは設定した bws 本体で、引数は固定（変わるのは ID だけ）。シェルは通さない
+	cmd := exec.CommandContext(ctx, b.path, "secret", "get", id, "--output", "json", "--color", "no") // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd.Env = []string{"BWS_ACCESS_TOKEN=" + b.token, "HOME=" + b.home}
 	cmd.Dir = b.home
 	// 取り消し（時間切れか、門番を止めた）のときは bws を kill する。bws が子を残して出力を握っていても、

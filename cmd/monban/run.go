@@ -182,7 +182,8 @@ func runChild(path string, argv, env []string, value string, stdin *os.File, std
 		outW.Close()
 		return childResult{}, err
 	}
-	cmd := &exec.Cmd{Path: path, Args: argv, Env: env, Stdout: outW, Stderr: errW}
+	// monban run は、使う人が指定したコマンドを動かすのが役目。argv をそのまま渡し、シェルは通さない
+	cmd := &exec.Cmd{Path: path, Args: argv, Env: env, Stdout: outW, Stderr: errW} // nosemgrep: go.lang.security.audit.dangerous-exec-cmd.dangerous-exec-cmd
 	if stdin != nil {
 		// nil の *os.File を io.Reader に入れると nil でなくなるので、nil のときは入れない（/dev/null になる）。
 		cmd.Stdin = stdin

@@ -144,9 +144,9 @@ func TestWaitMax(t *testing.T) {
 
 func TestPrintShown(t *testing.T) {
 	var b strings.Builder
-	printShown(&b, shown{ID: "abc", Agent: "claude\x1b[2J", Secret: "MONBAN_TEST", Command: []string{"/usr/bin/curl", "a\nb", "‮evil"}, User: true, Left: -3})
+	printShown(&b, shown{ID: "abc", Agent: "claude\x1b[2J", Secret: "MONBAN_TEST", Command: []string{"/usr/bin/curl", "a\nb", "\u202eevil"}, User: true, Left: -3})
 	out := b.String()
-	for _, bad := range []string{"\x1b", "a\nb", "‮"} {
+	for _, bad := range []string{"\x1b", "a\nb", "\u202e"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("制御文字をそのまま出した: %q", bad)
 		}
