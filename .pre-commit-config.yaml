@@ -1,0 +1,9 @@
+# vauban managed (v1.8.0) — このファイルは vauban の setup.sh が生成します。再実行で上書きされます。
+# https://github.com/mediiiiium/vauban
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: '(^|/)(node_modules|\.venv|venv|vendor|dist|build|__pycache__)/'

@@ -1,0 +1,14 @@
+# vauban managed (v1.8.0) — このファイルは vauban の setup.sh が生成します。再実行で上書きされます。
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 公開直後の（改ざんされ得る）新バージョンへの即時追従を避け、供給網リスクを緩和する。
+    cooldown:
+      default-days: 7
+    groups:
+      all-dependencies:
+        patterns:
+          - "*"

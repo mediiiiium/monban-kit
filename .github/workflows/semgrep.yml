@@ -1,0 +1,14 @@
+# vauban managed (v1.8.0) — このファイルは vauban の setup.sh が生成します。再実行で上書きされます。
+# スキャンの中身は https://github.com/mediiiiium/vauban/blob/main/.github/workflows/semgrep.yml
+name: Semgrep
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+  security-events: write   # SARIF を Security タブへ上げるのに必要
+jobs:
+  semgrep:
+    # vauban のタグ参照。SHA pin すると vauban 側の更新が届かなくなるため、意図してタグで呼ぶ。
+    uses: mediiiiium/vauban/.github/workflows/semgrep.yml@v1  # nosemgrep: yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag

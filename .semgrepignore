@@ -1,0 +1,12 @@
+# Semgrep のスキャン対象から除外するパス
+# https://semgrep.dev/docs/ignoring-files-folders-code
+#
+# 個別の検出を黙らせたい場合は、該当行の直前に  # nosemgrep  コメントを置く。
+node_modules/
+.venv/
+venv/
+vendor/
+dist/
+build/
+__pycache__/
+*.min.js
