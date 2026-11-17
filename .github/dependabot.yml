@@ -1,4 +1,4 @@
-# vauban managed (v1.8.0) — このファイルは vauban の setup.sh が生成します。再実行で上書きされます。
+# vauban managed (v1.8.1) — このファイルは vauban の setup.sh が生成します。再実行で上書きされます。
 version: 2
 updates:
   - package-ecosystem: "gomod"
