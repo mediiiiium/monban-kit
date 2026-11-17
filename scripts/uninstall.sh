@@ -23,6 +23,7 @@ STATE=/var/db/monban
 RUNDIR=/var/db/monban-run
 LOGDIR=/var/log/monban
 PLIST=/Library/LaunchDaemons/$LABEL.plist
+WATCH_PLIST=/Library/LaunchDaemons/$LABEL.watch.plist
 
 DRY=0
 LOGS=0
@@ -80,6 +81,17 @@ if [ -n "$HAVE_GROUP" ] && [ -n "$N" ] && [ "$HAVE_GROUP" != "$N" ]; then
 fi
 [ -n "$N" ] || echo "  番号の記録も $USER_NAME もない（消すものは root の持ち物だけのはず）"
 echo "  番号：${N:-なし}"
+
+say "1a. 見張りを launchd から外す（先に外す。門番を外したのを「止まっている」と知らせないように）"
+if /bin/launchctl print "system/$LABEL.watch" >/dev/null 2>&1; then
+	run /bin/launchctl bootout "system/$LABEL.watch"
+else
+	echo "  入っていない"
+fi
+if [ -e "$WATCH_PLIST" ] || [ -L "$WATCH_PLIST" ]; then
+	owned "$WATCH_PLIST" 0
+	run rm "$WATCH_PLIST"
+fi
 
 say "1. launchd から外す（動いていれば、合図で止まり、停止の行を書く。止めた印は置かない）"
 if /bin/launchctl print "system/$LABEL" >/dev/null 2>&1; then

@@ -19,6 +19,8 @@ const usage = `使い方: monban <サブコマンド> [引数]
   approve <番号>            承認を待っている要求を見て、承認する（番号は Pushover か門番のログにある8桁）
   deny <番号>               承認を待っている要求を拒否する
   stop                      門番を止め、合言葉の失効の手順を出す（キルスイッチ）
+  watch -state-dir <ディレクトリ> -pushover <ファイル>
+                            門番が動いていなければ Pushover で知らせる（launchd から 15 分ごとに呼ぶ）
   verify-log [-at <seq>] <ログ>
                             ログのハッシュの連鎖を確かめる（-at はその seq の行のハッシュも出す）
 `
@@ -43,6 +45,8 @@ func main() {
 		err = runStop(args)
 	case "verify-log":
 		err = runVerifyLog(args)
+	case "watch":
+		err = runWatch(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return

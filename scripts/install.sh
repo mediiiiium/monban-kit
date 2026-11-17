@@ -24,6 +24,7 @@ SECRET=$STATE/secret
 RUNDIR=/var/db/monban-run
 LOGDIR=/var/log/monban
 PLIST=/Library/LaunchDaemons/$LABEL.plist
+WATCH_PLIST=/Library/LaunchDaemons/$LABEL.watch.plist
 # bws は Bitwarden Inc の Developer ID で署名されていること（門番の bws.go と同じ条件）。
 BWS_REQ='anchor apple generic and identifier "bws" and certificate leaf[subject.OU] = "LTZ2PFU5D6"'
 
@@ -82,7 +83,7 @@ if /bin/launchctl print "system/$LABEL" >/dev/null 2>&1; then
 	die "門番が launchd に入っている（先に scripts/uninstall.sh）"
 fi
 # 何もないはずの場所。
-for p in "$PLIST" "$LIBEXEC" "$BIN_LINK" "$ETC/allowlist.json" "$STATE" "$RUNDIR"; do
+for p in "$PLIST" "$WATCH_PLIST" "$LIBEXEC" "$BIN_LINK" "$ETC/allowlist.json" "$STATE" "$RUNDIR"; do
 	if [ -e "$p" ] || [ -L "$p" ]; then
 		die "もうある（入れ直すなら、先に scripts/uninstall.sh）: $p"
 	fi
@@ -282,6 +283,47 @@ if [ "$DRY" = 1 ]; then
 fi
 run /usr/bin/install -o root -g wheel -m 0644 "$TMP/plist" "$PLIST"
 
+say "7b. 見張りの plist を $WATCH_PLIST に置く（15 分ごとに、門番が動いているかを見て、止まっていれば Pushover で知らせる）"
+# stderr の置き場は書かない（/var/log が消えても見張りは動く。2026-11-17 の件）。
+cat >"$TMP/watch" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LABEL.watch</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$LIBEXEC/monban</string>
+		<string>watch</string>
+		<string>-label</string>
+		<string>$LABEL</string>
+		<string>-socket</string>
+		<string>$RUNDIR/monban.sock</string>
+		<string>-state-dir</string>
+		<string>$STATE</string>
+		<string>-pushover</string>
+		<string>$SECRET/pushover.json</string>
+	</array>
+	<key>UserName</key>
+	<string>$USER_NAME</string>
+	<key>GroupName</key>
+	<string>$GROUP_NAME</string>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>900</integer>
+</dict>
+</plist>
+EOF
+/usr/bin/plutil -lint -s "$TMP/watch" || die "見張りの plist の形が正しくない"
+if [ "$DRY" = 1 ]; then
+	sed 's/^/    /' "$TMP/watch"
+fi
+run /usr/bin/install -o root -g wheel -m 0644 "$TMP/watch" "$WATCH_PLIST"
+
 # --- 8. ここから先は人が打つ ---
 
 say "8. 入れ終わった。ここから先は、エージェントのいない新しいウィンドウで打つ"
@@ -299,8 +341,9 @@ cat <<EOF
        (cd / && printf '{"token":"%s","user":"%s"}\n' "\$PT" "\$PU" | sudo -u $USER_NAME /bin/sh -c 'umask 077; cat > $SECRET/pushover.json')
        unset PT PU
 
-  c. 起動する：
+  c. 起動する（門番と見張り）：
        sudo launchctl bootstrap system $PLIST
+       sudo launchctl bootstrap system $WATCH_PLIST
 
   d. 起動した後に、持ち主とモードを目で確かめる：
        sudo ls -la $SECRET $LOGDIR $RUNDIR
