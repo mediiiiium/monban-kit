@@ -22,7 +22,7 @@ IDS=$ETC/ids
 STATE=/var/db/monban
 SECRET=$STATE/secret
 RUNDIR=/var/db/monban-run
-LOGDIR=/var/log/monban
+LOGDIR=/var/db/monban-log
 PLIST=/Library/LaunchDaemons/$LABEL.plist
 WATCH_PLIST=/Library/LaunchDaemons/$LABEL.watch.plist
 # bws は Bitwarden Inc の Developer ID で署名されていること（門番の bws.go と同じ条件）。
@@ -89,7 +89,7 @@ for p in "$PLIST" "$WATCH_PLIST" "$LIBEXEC" "$BIN_LINK" "$ETC/allowlist.json" "$
 	fi
 done
 # 上のディレクトリ（あるものだけ）。ユーザーの持ち物だと、同じ uid のエージェントが中身を差し替えられる。
-for p in /usr/local /usr/local/bin /usr/local/libexec /usr/local/etc "$ETC" /var/db /var/log /Library/LaunchDaemons; do
+for p in /usr/local /usr/local/bin /usr/local/libexec /usr/local/etc "$ETC" /var/db /Library/LaunchDaemons; do
 	[ -d "$p" ] || continue
 	[ "$(stat -f '%u' "$p")" = 0 ] || die "root の持ち物ではない（門番は、上のディレクトリを書き換えられる置き場を受け付けない）: $p"
 	case "$(stat -f '%Lp' "$p")" in
@@ -202,6 +202,7 @@ run /usr/bin/install -d -o "$N" -g "$N" -m 0750 "$RUNDIR"
 # --- 6. ログ ---
 
 say "6. ログの置き場 $LOGDIR"
+# /var/log の下には置かない。2026-11-14 の macOS の大型アップデートで /var/log が作り直され、ログが置き場ごと消えた。
 # ある・ないで分ける。あるなら、持ち主とモードが想定どおりかだけを見て、中身には触らない（連鎖はそのまま続く）。
 want() { # want <パス> <uid> <gid> <モード>
 	got=$(stat -f '%u %g %Lp' "$1")

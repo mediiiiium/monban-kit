@@ -7,7 +7,7 @@
 # - 中身を読んでから、人が sudo で動かす。エージェントには動かさせない
 # - 消す前に、持ち主が想定どおり（_monban か root）かを見る。違えば、そこで止まる
 # - 合言葉のファイルは消える。合言葉そのものは生きているので、要るなら失効させる（最後に手順を出す）
-# - ログ（/var/log/monban）は、--remove-logs を付けなければ残す
+# - ログ（/var/db/monban-log）は、--remove-logs を付けなければ残す
 # - 番号の記録（/usr/local/etc/monban/ids）は残す。入れ直すときに同じ番号を使う
 
 set -eu
@@ -21,7 +21,7 @@ ETC=/usr/local/etc/monban
 IDS=$ETC/ids
 STATE=/var/db/monban
 RUNDIR=/var/db/monban-run
-LOGDIR=/var/log/monban
+LOGDIR=/var/db/monban-log
 PLIST=/Library/LaunchDaemons/$LABEL.plist
 WATCH_PLIST=/Library/LaunchDaemons/$LABEL.watch.plist
 

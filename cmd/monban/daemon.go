@@ -72,6 +72,8 @@ type server struct {
 	// killed は、monban stop の要求を受けたか。halt を呼んだ順番に関係なく、立っていれば印を置く
 	// （先に待ち受けの失敗などで halt が呼ばれると、mark は false のまま決まってしまうため）。
 	killed atomic.Bool
+	// headPath は、ログの先頭の控えの置き場（"" なら置かない）。停止の行の後に置き換える。
+	headPath string
 }
 
 // halt は、門番を止め始める。何度呼んでもよい（最初の理由だけを残す）。
@@ -133,7 +135,7 @@ func runDaemon(args []string) error {
 	if production && *stateDir == "" {
 		return errors.New("本番の形（門番の uid が -owner-uid と違う）では -state-dir が要る（ないと、monban stop で止めても再起動で動き出す）")
 	}
-	var marker string
+	var marker, headPath string
 	if *stateDir != "" {
 		if !filepath.IsAbs(*stateDir) {
 			return fmt.Errorf("状態のディレクトリは絶対パスにしてください: %s", *stateDir)
@@ -142,6 +144,7 @@ func runDaemon(args []string) error {
 			return fmt.Errorf("状態のディレクトリ: %w", err)
 		}
 		marker = filepath.Join(*stateDir, stoppedName)
+		headPath = filepath.Join(*stateDir, logHeadName)
 	}
 
 	bwsReal, err := checkBws(*bwsPath)
@@ -171,6 +174,12 @@ func runDaemon(args []string) error {
 	if err != nil {
 		return fmt.Errorf("ソケットの置き場: %w", err)
 	}
+	// ログがファイルごと消えた・入れ替わったなら、新しいログを作る前に止める（openAudit は無ければ作る）。
+	if headPath != "" {
+		if refused := refuseIfLogLost(headPath, *logFile, push); refused {
+			return nil
+		}
+	}
 	audit, prior, err := openAudit(*logFile, sockDir.Sys().(*syscall.Stat_t).Gid)
 	if err != nil {
 		return err
@@ -195,6 +204,15 @@ func runDaemon(args []string) error {
 	if err := audit.write(start); err != nil {
 		return fmt.Errorf("ログに書けない: %w", err)
 	}
+	headNote := ""
+	if headPath != "" {
+		seq, h := audit.head()
+		if err := writeLogHead(headPath, seq, h); err != nil {
+			// 控えが古いままでも、ログは伸びるだけなので次の起動は通る。消えたときに気づけなくなるだけ。
+			log.Printf("注意！！ ログの先頭の控えを置けない（ログが消えても気づけない）: %v", err)
+			headNote = "\n注意：ログの先頭の控えを置けなかった"
+		}
+	}
 	srv := &server{
 		owner: uint32(*ownerUID),
 		bws:   &bwsClient{path: bwsReal, token: token, home: home, quiet: production},
@@ -202,6 +220,8 @@ func runDaemon(args []string) error {
 		audit: audit,
 		push:  push,
 		stop:  make(chan struct{}),
+
+		headPath: headPath,
 	}
 	srv.ctx, srv.cancel = context.WithCancel(context.Background())
 	// ユーザーの持ち物の場所のコマンドを許しているなら、本人が選んだ緩さとして画面とログに残す。
@@ -222,7 +242,7 @@ func runDaemon(args []string) error {
 	// 起動の知らせに、ログの連鎖の今の先頭を載せる（門番の外の写し）。送れなくても動く。
 	seq, h := audit.head()
 	log.Printf("ログ seq %d ハッシュ %s", seq, h)
-	srv.notify("monban 起動", fmt.Sprintf("門番を起動した\nログ seq %d\nハッシュ %s", seq, short(h)))
+	srv.notify("monban 起動", fmt.Sprintf("門番を起動した\nログ seq %d\nハッシュ %s%s", seq, short(h), headNote))
 	srv.ln = ln
 	go func() {
 		s := <-sig
@@ -294,6 +314,10 @@ func (s *server) shutdown(marker, sock string) {
 	seq, h, err := s.audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "門番を止めた（" + s.why + "）"})
 	if err != nil {
 		log.Printf("停止の行を書けない: %v", err)
+	} else if s.headPath != "" {
+		if err := writeLogHead(s.headPath, seq, h); err != nil {
+			log.Printf("注意！！ ログの先頭の控えを置けない: %v", err)
+		}
 	}
 	// 止めた印は、停止の行の後、ソケットを消す前に置く（monban stop が「止まった」と言うときには、印がある）。
 	markNote := ""
@@ -318,6 +342,26 @@ func short(h string) string {
 		return h[:16]
 	}
 	return h
+}
+
+// refuseIfLogLost は、ログの先頭の控えがあって、ログがそれと合わなければ、知らせて true を返す。
+// ログには書かない（合わないログに足すと、どれが本物かわからなくなる）。正常に終わる（KeepAlive で起き直させない）。
+// 起動していないことは、見張り（monban watch）も知らせ続ける。
+func refuseIfLogLost(headPath, logPath string, push *pushover) bool {
+	h, ok, err := readLogHead(headPath)
+	if err == nil && !ok {
+		log.Printf("ログの先頭の控えがない（初めて）。確かめずに起動し、控えを置く: %s", headPath)
+		return false
+	}
+	if err == nil {
+		if err = checkLogHead(logPath, h); err == nil {
+			return false
+		}
+	}
+	log.Printf("注意！！ 起動しない: %v", err)
+	log.Printf("ログを戻せるなら %s に戻してから起動する。わざと新しくしたなら、控えを消す: sudo rm %s", logPath, headPath)
+	(&server{push: push}).notify("monban 起動しなかった", fmt.Sprintf("ログが消えたか、控えと合わない\n%v\n控え: seq %d ハッシュ %s\n戻すか、わざとなら sudo rm %s", err, h.Seq, short(h.Hash), headPath))
+	return true
 }
 
 // refuseIfStopped は、止めた印があれば、ログに1行足して（連鎖の決まりどおり、停止の行として）閉じ、true を返す。

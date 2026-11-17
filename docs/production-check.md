@@ -210,7 +210,7 @@ sudo -k
 
 - 門番は本物の合言葉のまま動かしておく（届くのは `MONBAN_TEST` だけ。本番の形を動かし続けるのも10段目の意味）。最初の本物の秘密を入れるときに、新しい合言葉に替える
 - やめるなら `monban stop` で止め、出てくる手順で合言葉を失効させる
-- 確かめた後に、`monban verify-log /var/log/monban/audit.log` で連鎖が合うか見る
+- 確かめた後に、`monban verify-log /var/db/monban-log/audit.log` で連鎖が合うか見る
 
 ## 結果
 

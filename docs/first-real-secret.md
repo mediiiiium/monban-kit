@@ -134,7 +134,7 @@ sudo grep -c '^0\.' /var/db/monban/secret/token
 
 - `state = running` で、`pid` が出ている
 - `token` が `_monban` の 0600（`-rw-------`）、最後の数が `1`
-- 動いていなければ、`sudo tail -20 /var/log/monban/daemon.log` で理由を見る（許可リストの書き間違いや、コマンドの置き場の確かめで止まっていることが多い）。古い承認の番号が出ていることがあるが、期限の切れたもので、貼らなければよい
+- 動いていなければ、`sudo tail -20 /var/db/monban-log/daemon.log` で理由を見る（許可リストの書き間違いや、コマンドの置き場の確かめで止まっていることが多い）。古い承認の番号が出ていることがあるが、期限の切れたもので、貼らなければよい
 
 ## 5. 新しい合言葉で通し、古いものを失効させる
 
@@ -187,8 +187,8 @@ monban approve <番号>
 ## 6. 記録を確かめて片づける
 
 ```sh
-monban verify-log /var/log/monban/audit.log
-tail -6 /var/log/monban/audit.log
+monban verify-log /var/db/monban-log/audit.log
+tail -6 /var/db/monban-log/audit.log
 sudo -k
 ```
 
