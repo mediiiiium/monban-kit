@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -72,6 +74,38 @@ func TestKillPlacesMarker(t *testing.T) {
 		t.Fatalf("印がないのに断った: %v %v", refused, err)
 	}
 	audit.close(auditEntry{Result: "試しの後片づけ"})
+}
+
+// 待ち受けの失敗などで先に halt（印なし）が呼ばれても、monban stop の要求を受けていれば印を置く。
+func TestKillMarkerAfterEarlierHalt(t *testing.T) {
+	srv, sock, logPath := newTestServer(t, uint32(os.Getuid()))
+	state := filepath.Join(filepath.Dir(logPath), "state")
+	os.Mkdir(state, 0o700)
+	marker := filepath.Join(state, stoppedName)
+	srv.halt("待ち受けが失敗した", false)
+	a, b := net.Pipe()
+	go func() { buf := make([]byte, 256); b.Read(buf); b.Close() }()
+	srv.handleKill(a, auditEntry{ID: newRequestID()}, peer{uid: uint32(os.Getuid()), pid: os.Getpid()})
+	a.Close()
+	srv.shutdown(marker, sock)
+	if _, err := os.Lstat(marker); err != nil {
+		t.Fatalf("止める要求を受けたのに印がない: %v", err)
+	}
+}
+
+// fd やメモリの不足は一時的な失敗として受け直す。それ以外は止まる。
+func TestTemporaryAccept(t *testing.T) {
+	wrap := func(e syscall.Errno) error {
+		return &net.OpError{Op: "accept", Net: "unix", Err: os.NewSyscallError("accept", e)}
+	}
+	for _, e := range []syscall.Errno{syscall.EMFILE, syscall.ENFILE, syscall.ENOBUFS, syscall.ENOMEM} {
+		if !temporaryAccept(wrap(e)) {
+			t.Errorf("%v を一時的な失敗と見なかった", e)
+		}
+	}
+	if temporaryAccept(wrap(syscall.EBADF)) || temporaryAccept(net.ErrClosed) {
+		t.Error("一時的でない失敗を受け直そうとした")
+	}
 }
 
 // 合図で止めたときは、印を置かない（落ちたときと同じく、起き直してよい）。

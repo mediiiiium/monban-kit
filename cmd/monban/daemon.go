@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -68,6 +69,9 @@ type server struct {
 	haltOnce sync.Once
 	why      string // 何で止めたか（停止の行と知らせに書く）
 	mark     bool   // 止めた印を置くか（monban stop で止めたときだけ）
+	// killed は、monban stop の要求を受けたか。halt を呼んだ順番に関係なく、立っていれば印を置く
+	// （先に待ち受けの失敗などで halt が呼ばれると、mark は false のまま決まってしまうため）。
+	killed atomic.Bool
 }
 
 // halt は、門番を止め始める。何度呼んでもよい（最初の理由だけを残す）。
@@ -226,26 +230,60 @@ func runDaemon(args []string) error {
 	}()
 
 	log.Printf("待ち受け開始 socket=%s owner-uid=%d bws=%s 秘密の数=%d Pushover=%v", *sockPath, *ownerUID, bwsReal, len(allow.secrets), push != nil)
+	err = srv.serve(ln)
+	if err != nil {
+		srv.halt("待ち受けが失敗した", false)
+	}
+	// 失敗で終わるときも同じ片づけを通す（monban stop の要求を受けていれば、印を置く）。
+	srv.shutdown(marker, *sockPath)
+	return err
+}
+
+// serve は、接続を受けて handle に回す。待ち受けを閉じたら nil を返す。
+// fd の使い切りなどの一時的な失敗では止まらず、間を空けてから受け直す
+// （同じ uid のエージェントが接続を溜めて門番を落とし、launchd に起き直させる筋を断つ）。
+func (s *server) serve(ln *net.UnixListener) error {
+	var delay time.Duration
 	for {
 		c, err := ln.AcceptUnix()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				break
+				return nil
 			}
-			srv.halt("待ち受けが失敗した", false)
-			srv.conns.Wait()
-			audit.close(auditEntry{UID: uint32(os.Geteuid()), PID: os.Getpid(), Result: "待ち受けが失敗して止めた"})
-			os.Remove(*sockPath)
-			return err
+			if !temporaryAccept(err) {
+				return err
+			}
+			if delay == 0 {
+				// 続いている間は1回だけ書く（ログを溢れさせない）。
+				log.Printf("注意！！ 接続を受けられない（間を空けて受け直す）: %v", err)
+				delay = 5 * time.Millisecond
+			} else if delay *= 2; delay > time.Second {
+				delay = time.Second
+			}
+			select {
+			case <-s.stop:
+				return nil
+			case <-time.After(delay):
+			}
+			continue
 		}
-		srv.conns.Add(1)
+		delay = 0
+		s.conns.Add(1)
 		go func() {
-			defer srv.conns.Done()
-			srv.handle(c)
+			defer s.conns.Done()
+			s.handle(c)
 		}()
 	}
-	srv.shutdown(marker, *sockPath)
-	return nil
+}
+
+// temporaryAccept は、受け直せば治りうる Accept の失敗か（fd やメモリの不足）。
+func temporaryAccept(err error) bool {
+	for _, e := range []syscall.Errno{syscall.EMFILE, syscall.ENFILE, syscall.ENOBUFS, syscall.ENOMEM} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
 }
 
 // shutdown は、止め始めた後の片づけ。動いている接続が終わるのを待ち、停止の行を書き、
@@ -259,7 +297,7 @@ func (s *server) shutdown(marker, sock string) {
 	}
 	// 止めた印は、停止の行の後、ソケットを消す前に置く（monban stop が「止まった」と言うときには、印がある）。
 	markNote := ""
-	if s.mark && marker != "" {
+	if (s.mark || s.killed.Load()) && marker != "" {
 		if err := writeMarker(marker, s.why, seq, h); err != nil {
 			log.Printf("注意！！ 止めた印を置けない（再起動で動き出す）: %v", err)
 			markNote = "\n注意：止めた印を置けなかった"
@@ -594,6 +632,8 @@ const opKill = "kill"
 // 持ち主の uid の照合は handle で済んでいる。止める要求の行を書いてから「OK <ID>」を返し、止め始める。
 // ログに書けなくても止める（止める向きは安全な側）。
 func (s *server) handleKill(c net.Conn, e auditEntry, p peer) {
+	// OK を返す前に立てる。monban stop が「止まった」と言うときには、どの終わり方でも印がある。
+	s.killed.Store(true)
 	e.Result = "止める要求を受けた"
 	if err := s.audit.write(e); err != nil {
 		log.Printf("ログに書けない（それでも止める）: %v", err)

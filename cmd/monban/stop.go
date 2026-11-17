@@ -55,7 +55,7 @@ func runStop(args []string) error {
 func stopDaemon(w io.Writer, sock string, limit time.Duration) error {
 	c, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
-		return fmt.Errorf("門番に繋げない（もう止まっているか、置き場が違う）: %w", err)
+		return fmt.Errorf("門番に繋げない。止まったとは限らない（置き場が違うか、接続が詰まっている。ps で門番のプロセスが残っていないか確かめる）: %w", err)
 	}
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 	b, _ := json.Marshal(request{Op: opKill})

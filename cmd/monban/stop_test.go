@@ -37,16 +37,7 @@ func newTestServer(t *testing.T, owner uint32) (*server, string, string) {
 	}
 	srv := &server{owner: owner, allow: &allowlist{}, audit: audit, stop: make(chan struct{}), ln: ln}
 	srv.ctx, srv.cancel = context.WithCancel(context.Background())
-	go func() {
-		for {
-			c, err := ln.AcceptUnix()
-			if err != nil {
-				return
-			}
-			srv.conns.Add(1)
-			go func() { defer srv.conns.Done(); srv.handle(c) }()
-		}
-	}()
+	go srv.serve(ln)
 	return srv, sock, logPath
 }
 
