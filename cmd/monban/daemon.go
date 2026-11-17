@@ -262,11 +262,32 @@ func runDaemon(args []string) error {
 // serve は、接続を受けて handle に回す。待ち受けを閉じたら nil を返す。
 // fd の使い切りなどの一時的な失敗では止まらず、間を空けてから受け直す
 // （同じ uid のエージェントが接続を溜めて門番を落とし、launchd に起き直させる筋を断つ）。
+//
+// 同時に扱う接続は maxConns まで。埋まっている間は受けずに待つ（溢れた分はカーネルの待ち行列に並ぶ）。
+// 受けてから断ると、並んでいた monban stop まで断ることになるので、断らずに待たせる。
+// 要求を読むまでの締め切りは requestWait（handle）なので、何も送らない接続では長く埋まらない。
 func (s *server) serve(ln *net.UnixListener) error {
 	var delay time.Duration
+	slots := make(chan struct{}, maxConns)
+	full := false
 	for {
+		select {
+		case slots <- struct{}{}:
+		default:
+			if !full {
+				// 埋まっている間は1回だけ書く（ログを溢れさせない）。
+				log.Printf("注意！！ 同時の接続が %d に達した（空くまで新しい接続を待たせる）", maxConns)
+				full = true
+			}
+			select {
+			case slots <- struct{}{}:
+			case <-s.stop:
+				return nil
+			}
+		}
 		c, err := ln.AcceptUnix()
 		if err != nil {
+			<-slots
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
@@ -288,9 +309,13 @@ func (s *server) serve(ln *net.UnixListener) error {
 			continue
 		}
 		delay = 0
+		if full && len(slots) < maxConns/2 {
+			full = false
+		}
 		s.conns.Add(1)
 		go func() {
 			defer s.conns.Done()
+			defer func() { <-slots }()
 			s.handle(c)
 		}()
 	}
@@ -533,6 +558,13 @@ type request struct {
 
 const maxRequest = 16384
 
+// 同時に扱う接続の上限と、要求の1行を読むまでの締め切り（試験で小さくするので var）。
+// 承認待ちは別に4つまで（approval.go）なので、上限はそれより十分大きくする。
+var (
+	maxConns    = 64
+	requestWait = 2 * time.Second
+)
+
 // maxValue は、run に渡す値の大きさの上限（バイト）。run の側も、これを元に読む量を絞る。
 const maxValue = 65536
 
@@ -557,7 +589,8 @@ func argsHash(args []string) string {
 
 func (s *server) handle(c *net.UnixConn) {
 	defer c.Close()
-	c.SetDeadline(time.Now().Add(30 * time.Second))
+	// 要求の1行が来るまでは短く待つ（クライアントは繋いだらすぐ送る）。読めたら30秒に延ばす。
+	c.SetDeadline(time.Now().Add(requestWait))
 
 	p, err := peerOf(c)
 	if err != nil {
@@ -585,6 +618,7 @@ func (s *server) handle(c *net.UnixConn) {
 		deny("要求を読めない")
 		return
 	}
+	c.SetDeadline(time.Now().Add(30 * time.Second))
 	var req request
 	if err := json.Unmarshal(line, &req); err != nil {
 		deny("要求を読めない")
